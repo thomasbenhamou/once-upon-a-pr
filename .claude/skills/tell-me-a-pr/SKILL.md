@@ -13,7 +13,7 @@ Takes an MR/PR (GitLab or GitHub) and produces a self-contained interactive HTML
 2. A handful of code slides showing the risky or interesting parts as rendered diffs with sketchy callouts.
 3. A link back to each file on the MR so the reviewer can dive in when they want.
 
-Output lives in `docs/tell-me-a-pr/<mr-id>/` and is linked from a comment posted on the MR.
+Output lives in `docs/tell-me-a-pr/<slug>/<slug>.html` (where `<slug>` is `<mr-id>-<title-slug>`, e.g. `1234-add-notification-center`) and is linked from a comment posted on the MR.
 
 The visual theme is hand-drawn: rough.js sketches, highlighter spans, tag chips, a persistent keyboard hint above the arrows. The template handles all of that — your job is to feed it bullets and diffs.
 
@@ -113,6 +113,8 @@ Dispatch an `mr-fetcher` subagent with `$ARGUMENTS` (may be a URL, a branch name
 >
 > 5. **Truncate the description** to ≤500 chars in the returned blob (keep the head). The architect doesn't need the full body — just the gist.
 >
+> 6. **Compute a `slug`** as `<mr-id>-<title-slug>`, where `<title-slug>` is the MR title lowercased, with non-alphanumeric chars collapsed to single hyphens, leading/trailing hyphens stripped, and truncated to 50 chars (cut on a word boundary if possible). Example: MR #1234 "Add notification center, v1" → `1234-add-notification-center-v1`.
+>
 > Return JSON only:
 >
 > ```json
@@ -121,6 +123,7 @@ Dispatch an `mr-fetcher` subagent with `$ARGUMENTS` (may be a URL, a branch name
 >   "mr_id": "123",
 >   "mr_url": "https://...",
 >   "title": "...",
+>   "slug": "1234-add-notification-center-v1",
 >   "description_excerpt": "first 500 chars...",
 >   "author": "tbenhamou",
 >   "base": "main",
@@ -261,8 +264,8 @@ Dispatch a `deck-builder` subagent with the full slide spec (architect output + 
 
 The builder must:
 
-1. Copy `assets/deck-template/` to `docs/tell-me-a-pr/<mr-id>/`.
-2. Replace the `<!-- SLIDES -->` placeholder in `index.html` with the generated `<section class="slide">` blocks.
+1. Copy `assets/deck-template/` to `docs/tell-me-a-pr/<slug>/`, then rename the copied `index.html` to `<slug>.html`.
+2. Replace the `<!-- SLIDES -->` placeholder in `<slug>.html` with the generated `<section class="slide">` blocks. Also replace the `<title>…</title>` tag's contents with `<slug>` so the browser tab shows the PR slug.
 3. Render bullets:
    - Each bullet entry is either a string or an object `{ "text": "...", "why": "..." }`. For object form, render `why` as a dimmed italic `<span class="bullet-why">…</span>` beneath the bullet text. Both forms otherwise follow the same rules below.
    - Strip `[tag]` prefixes from the start of the bullet text and render them as `<span class="chip chip--<tag>">tag</span>`.
@@ -278,10 +281,10 @@ The hand-drawn theme (rough.js sketches, highlighter spans, tag chips, the persi
 
 ### Phase 6 — Publish (ask first; never auto-publish)
 
-The deck is now sitting at `docs/tell-me-a-pr/<mr-id>/index.html`. **Do not commit, push, or post a comment without explicit user confirmation.** Show the local path and ask the user what to do via `AskUserQuestion`:
+The deck is now sitting at `docs/tell-me-a-pr/<slug>/<slug>.html`. **Do not commit, push, or post a comment without explicit user confirmation.** Show the local path and ask the user what to do via `AskUserQuestion`:
 
 > Header: `Publish deck`
-> Question: `Deck generated at docs/tell-me-a-pr/<mr-id>/. Publish it?`
+> Question: `Deck generated at docs/tell-me-a-pr/<slug>/<slug>.html. Publish it?`
 > Options:
 > - `Leave on disk (Recommended)` — keep the files locally; user reviews/iterates first.
 > - `Commit only` — `git add` + `git commit`. No push, no MR comment.
@@ -291,10 +294,10 @@ The deck is now sitting at `docs/tell-me-a-pr/<mr-id>/index.html`. **Do not comm
 Then act on the choice:
 
 - **Leave on disk:** print the local path and stop.
-- **Commit only:** `git add docs/tell-me-a-pr/<mr-id>/ && git commit -m "docs(tell-me-a-pr): add review deck for MR <id>"`. Stop.
+- **Commit only:** `git add docs/tell-me-a-pr/<slug>/ && git commit -m "docs(tell-me-a-pr): add review deck for MR <id>"`. Stop.
 - **Commit + push:** above + `git push`. Stop.
 - **Commit + push + comment on MR:** above + post a comment:
-  > 📖 **Review deck:** [`docs/tell-me-a-pr/<mr-id>/index.html`](<url-to-file-at-head-commit>)
+  > 📖 **Review deck:** [`docs/tell-me-a-pr/<slug>/<slug>.html`](<url-to-file-at-head-commit>)
   >
   > Generated walkthrough — ~`<N>` slides, `<T>s` to read. Open it raw-rendered or clone & double-click.
   - **GitLab:** `glab mr note <id> --message "..."`
