@@ -31,7 +31,7 @@ vendor/fonts/PatrickHand-latin.woff2     (Patrick Hand 400)
 
 ## Slide JSON shape (the contract)
 
-The builder consumes a JSON array of slide specs. The shape is:
+The builder consumes a JSON array of slide specs. Slide kinds: `cover`, `section`, `risk`, `code`, `skipped`, `outro`. The shape is:
 
 ```json
 [
@@ -40,12 +40,22 @@ The builder consumes a JSON array of slide specs. The shape is:
                 "[fix] À venir badge on next pending installment",
                 "[fix] drops duplicated refund block on NOT_REFUNDED claims"],
     "meta": { "author": "tbenhamou", "branch": "feat/claim-detail-pass",
-              "lines_added": 142, "lines_removed": 33, "files_changed": 7 } },
+              "lines_added": 142, "lines_removed": 33, "files_changed": 7,
+              "shape": "feature", "est_read_seconds": 90 } },
 
   { "kind": "section", "title": "The CTA split",
     "caption": "Why the panel needed two buttons, not one.",
     "bullets": ["Classical and Payvet diverge after status check",
                 "Old code branched at the wrong layer"] },
+
+  { "kind": "risk", "title": "What could break",
+    "caption": "Two risks not pinned to a single line",
+    "bullets": [
+      { "text": "[risk] Payvet flag default off in staging",
+        "why": "Off-path ships dark-launched; QA hits classical only, Payvet path untested in staging." },
+      { "text": "[risk] no rollback for the **kind** backfill",
+        "why": "Once written, undoing requires another migration. Coordinate with ops before the merge window." }
+    ] },
 
   { "kind": "code", "title": "Two CTAs, one resolver",
     "caption": "Resolver picks the flow before the button mounts.",
@@ -54,11 +64,17 @@ The builder consumes a JSON array of slide specs. The shape is:
     "diff": "diff --git a/src/claims/detail/ClaimCta.tsx b/src/claims/detail/ClaimCta.tsx\n--- a/src/claims/detail/ClaimCta.tsx\n+++ b/src/claims/detail/ClaimCta.tsx\n@@ -12,4 +12,9 @@\n ...",
     "callouts": [{ "line": 34, "note": "guards Payvet behind feature flag", "kind": "warn" }] },
 
+  { "kind": "skipped", "title": "Not in the deck",
+    "caption": "Skim these in the platform UI",
+    "groups": [
+      { "label": "routine route handlers", "count": 12 },
+      { "label": "snapshot updates", "count": 8 },
+      { "label": "type-only changes", "count": 3 }
+    ] },
+
   { "kind": "outro",
     "title": "Where to start",
     "bullets": [
-      { "text": "[risk] Payvet flag default not set in staging",
-        "why": "Default-off ships dark-launched; QA on classical only — Payvet path untested in staging." },
       "[new] new resolver in ClaimCta.tsx",
       "[fix] verify NOT_REFUNDED snapshot test"
     ],
@@ -69,6 +85,16 @@ The builder consumes a JSON array of slide specs. The shape is:
 
 Bullets are either bare strings (most cases) or objects `{ "text": "...", "why": "..." }`. The object form is required when a `[risk]` bullet's consequence can't fit the 12-word cap on `text` — `why` carries the failure mode and renders as a dimmed italic line beneath the bullet.
 
+### Slide-budget contract
+
+Slide count tracks PR complexity, not size. **14 is a hard ceiling.**
+
+| Shape | Slides | Composition |
+|---|---|---|
+| Tiny / docs-only | 2-3 | cover + (optional 1 code) + outro. No section, no risk, no skipped. |
+| Normal | 5-9 | cover + 0-1 section + 2-5 code + (optional risk) + skipped + outro. |
+| Exceptional | 10-14 | cover + 1-2 sections + 5-9 code + risk + skipped + outro. |
+
 ## Slide spec → HTML mapping
 
 ### `cover`
@@ -77,7 +103,8 @@ Bullets are either bare strings (most cases) or objects `{ "text": "...", "why":
 { "kind": "cover", "title": "...", "subtitle": "...",
   "bullets": ["[new] ...", "[fix] ..."],
   "meta": { "author": "...", "branch": "...",
-            "lines_added": 142, "lines_removed": 33, "files_changed": 7 } }
+            "lines_added": 142, "lines_removed": 33, "files_changed": 7,
+            "shape": "feature", "est_read_seconds": 90 } }
 ```
 
 ```html
@@ -86,13 +113,18 @@ Bullets are either bare strings (most cases) or objects `{ "text": "...", "why":
   <p class="subtitle">{{subtitle}}</p>
   <ul class="bullets">{{#bullets}}<li>{{rendered bullet}}</li>{{/bullets}}</ul>
   <div class="meta">
+    <span class="shape shape-{{meta.shape}}">{{meta.shape}}</span>
     <span><strong>by</strong>{{meta.author}}</span>
     <span><strong>branch</strong>{{meta.branch}}</span>
     <span><strong>+{{meta.lines_added}}</strong>/<strong>−{{meta.lines_removed}}</strong></span>
     <span><strong>{{meta.files_changed}}</strong>files</span>
+    <span class="read-time">~{{format_read_time(meta.est_read_seconds)}} read</span>
   </div>
 </section>
 ```
+
+- `meta.shape` is one of `feature | refactor | fix | integration | migration | mixed`. Renders as a chip in the meta strip; missing shape → omit the span (no empty chip).
+- `meta.est_read_seconds` is an integer. The builder formats it: `<60` → `"45s"`, `60–119` → `"1m 30s"`, `≥120` → `"2m 15s"` (round seconds to nearest 5). Missing → omit the span.
 
 ### `section`
 
@@ -150,6 +182,57 @@ Bullets are either bare strings (most cases) or objects `{ "text": "...", "why":
   Default if missing: `warn`.
 - `line` is the **new-file** line number (right side of the diff).
 - `why` is an optional one-liner (≤25 words) explaining the consequence/failure mode. **Required when `kind: "risk"`.** Rendered in the tooltip beneath `note`, separated by a thin rule and styled as dimmed italic.
+
+### `risk`
+
+```json
+{ "kind": "risk", "title": "What could break",
+  "caption": "Two risks not pinned to a single line",
+  "bullets": [
+    { "text": "[risk] **token rotation** moves to gateway",
+      "why": "Old in-app rotator stays wired up — double rotation if the flag flips before deploy." },
+    { "text": "[risk] feature flag default off",
+      "why": "Off-path is what ships to staging; the new code is dark-launched and untested in prod-shape data." }
+  ] }
+```
+
+```html
+<section class="slide" data-kind="risk">
+  <h2>{{title}}</h2>
+  <p class="caption">{{caption}}</p>
+  <ul class="bullets">{{#bullets}}<li>{{rendered bullet}}</li>{{/bullets}}</ul>
+</section>
+```
+
+- Same bullet rendering rules as `cover`/`section`/`outro`: tag chips, bold, highlighter, optional `why` line.
+- Use only when there are ≥2 cross-cutting risks that don't anchor to a single file/line, or a single risk too important to bury in a code-slide callout.
+- Almost every bullet here uses the object form (text + why) — naming the consequence is the whole point.
+
+### `skipped`
+
+```json
+{ "kind": "skipped", "title": "Not in the deck",
+  "caption": "Skim these in the platform UI",
+  "groups": [
+    { "label": "routine route handlers", "count": 12 },
+    { "label": "snapshot updates", "count": 8 },
+    { "label": "type-only changes", "count": 3 }
+  ] }
+```
+
+```html
+<section class="slide" data-kind="skipped">
+  <h2>{{title}}</h2>
+  <p class="caption">{{caption}}</p>
+  <ul class="skipped-groups">
+    {{#groups}}<li><span class="skipped-count">{{count}}</span> {{label}}</li>{{/groups}}
+  </ul>
+</section>
+```
+
+- Groups are plain text — no tag chips, no bold, no highlighter, no markdown.
+- ≤6 groups. Each label ≤4 words. Counts are integers, never zero.
+- If only 1-2 files would land here, dissolve the slide and put a single `[skipped]` bullet on the outro instead.
 
 ### `outro`
 

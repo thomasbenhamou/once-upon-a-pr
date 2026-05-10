@@ -20,8 +20,9 @@ The visual theme is hand-drawn: rough.js sketches, highlighter spans, tag chips,
 ## Core principles
 
 - **One-shot with subagents.** The orchestrator never loads the raw diff into its own context. Every heavy phase is delegated to a Task subagent that returns compact structured JSON.
-- **Adaptive, not templated.** Slide count and ordering adapt to the MR. A 20-line bugfix gets 3 slides. A 2000-line feature gets 12.
-- **Heuristics as safety net.** LLM judgment decides most things, but a fixed heuristic list (see `references/heuristics.md`) flags must-show items so critical code (migrations, auth, new integrations) never gets skipped.
+- **Selectivity is the feature.** The deck is *not* a coverage report. It surfaces the risky and interesting parts of the PR — boilerplate, routine route handlers, generated files, and mechanical renames stay out. The reviewer reads the deck, then skims the rest in the platform UI.
+- **Adaptive, lean by default.** Slide count tracks PR *complexity*, not size. Tiny/easy PR → 2-3 slides. Normal feature/fix → 5-9 slides. Exceptionally complex PR → 10-14 slides. **14 is a hard ceiling.** When in doubt, cut a slide.
+- **Heuristics as safety net.** LLM judgment decides most things, but a fixed heuristic list (see `references/heuristics.md`) marks files `must_consider` so critical code (migrations, auth, new integrations) is never silently dropped — though it may still be merged into a grouped bullet or listed on the Skipped slide rather than getting its own code slide.
 - **Bullets, not prose.** Each slide is a headline plus 3–5 short bullets. Code slides render a unified diff. The reviewer skims; nobody reads paragraphs on a slide.
 
 ---
@@ -67,9 +68,18 @@ This is the source of truth. It must match `assets/deck-template/README.md` and 
     { "text": "[risk] token rotation moves to gateway",
       "why": "Old in-app rotator stays wired up — double rotation if the flag flips before deploy." }
   ],
-  "meta": { "author": "...", "branch": "...", "lines_added": 142, "lines_removed": 33, "files_changed": 7 } }
+  "meta": { "author": "...", "branch": "...",
+            "lines_added": 142, "lines_removed": 33, "files_changed": 7,
+            "shape": "feature", "est_read_seconds": 90 } }
 
 { "kind": "section", "title": "...", "caption": "...", "bullets": ["...", "..."] }
+
+{ "kind": "risk", "title": "...", "caption": "...",
+  "bullets": [
+    { "text": "[risk] **token rotation** moves to gateway",
+      "why": "Old in-app rotator stays wired up — double rotation if the flag flips before deploy." },
+    "[risk] feature flag default off; **off-path** untested"
+  ] }
 
 { "kind": "code", "title": "...", "caption": "...",
   "file": "src/...", "file_url": "https://.../diffs#abc",
@@ -77,9 +87,29 @@ This is the source of truth. It must match `assets/deck-template/README.md` and 
   "callouts": [{ "line": 34, "note": "auth guard", "kind": "info|warn|risk",
                  "why": "consequence/failure mode — required when kind is risk" }] }
 
+{ "kind": "skipped", "title": "Not in the deck",
+  "caption": "Skim these in the platform UI",
+  "groups": [
+    { "label": "routine route handlers", "count": 12 },
+    { "label": "generated migrations", "count": 6 },
+    { "label": "snapshot updates", "count": 18 },
+    { "label": "doc tweaks", "count": 3 }
+  ] }
+
 { "kind": "outro", "title": "...", "bullets": ["...", "..."],
   "mr_url": "...", "files_changed": 14 }
 ```
+
+**Slide kind semantics:**
+
+| Kind | Purpose | Required cardinality |
+|---|---|---|
+| `cover` | Name the change. Shape + read-time on meta. | Always exactly 1, first slide. |
+| `section` | Frame the next 1-3 code slides. | 0-2 per deck. Skip on tiny PRs. |
+| `risk` | Bullet-only "watch this" slide for risks not anchored to a single file/line (missing rollback, untested off-path of a flag, breaking change for downstream callers, etc.). | 0-1 per deck. Use only when ≥2 such risks exist or a single risk is too cross-cutting for a `code` callout. |
+| `code` | One file, 1-3 hunks, 15-60 lines of diff, ≤4 callouts. | The bulk of the deck. |
+| `skipped` | Grouped tally of changes deliberately left out. Builds reviewer trust. | Always 1, second-to-last, *unless* PR is tiny (≤2 files, ≤30 lines). Position before `outro`. |
+| `outro` | Where to start reviewing. | Always exactly 1, last slide. |
 
 ---
 
@@ -158,8 +188,10 @@ Dispatch a `diff-analyzer` subagent with this prompt:
 >     "change_type": "added|modified|deleted|renamed",
 >     "lines_added": 42,
 >     "lines_removed": 3,
->     "must_show": true,
->     "must_show_reason": "new public API surface",
+>     "must_consider": true,
+>     "must_consider_reason": "new public API surface",
+>     "boilerplate": false,
+>     "boilerplate_reason": null,
 >     "interesting_score": 0.9,
 >     "interesting_reason": "introduces the notification center endpoints",
 >     "diff_hunk_hints": [0, 2]
@@ -167,7 +199,11 @@ Dispatch a `diff-analyzer` subagent with this prompt:
 > ]
 > ```
 >
-> Apply the heuristics in `references/heuristics.md` to set `must_show`. Apply your own judgment for `interesting_score` (0–1). `diff_hunk_hints` is optional — if you want to nudge the curator toward specific hunks (by index in the file's diff), include them; otherwise omit the field.
+> Apply the heuristics in `references/heuristics.md`:
+> - `must_consider: true` if the file matches an "include" heuristic (security, data layer, integrations, public API, infra, deps, flags, UI entry points). The architect downstream is allowed to merge these into a grouped bullet or skip them — but never silently drop them.
+> - `boilerplate: true` if the file matches a "Deprioritize / boilerplate" heuristic (routine handler mirroring siblings, autogenerated migration, snapshot/lockfile-only churn, pure rename, mirror test file). Boilerplate files cannot get their own code slide. They land on the Skipped slide unless they also have `must_consider: true` *and* a non-trivial reason — in which case the architect decides.
+> - `interesting_score` (0–1) is your judgment of whether the file is worth a code slide for *this* PR specifically. Mirror the question: "would a reviewer learn something they couldn't infer from the file path?" High = yes; low = no.
+> - `diff_hunk_hints` is optional — if you want to nudge the curator toward specific hunks (by index in the file's diff), include them; otherwise omit the field.
 >
 > Return JSON only. No prose.
 
@@ -175,16 +211,30 @@ Dispatch a `diff-analyzer` subagent with this prompt:
 
 Dispatch a `story-architect` subagent with the file entries from Phase 2 plus the MR metadata.
 
-> You are planning the slide deck for an MR walkthrough.
+> You are planning the slide deck for an MR walkthrough. Selectivity is the feature — the deck surfaces the risky and interesting parts; reviewers skim the rest in the platform UI.
 >
 > Input: MR metadata + the file analysis from the diff-analyzer.
 >
-> Decide:
-> - Total slide count (between 4 and 14, scaling with MR complexity — not size).
-> - Slide ordering that tells a coherent story: start from the user-facing intent, move through the backbone (API, domain, integrations), end with UI.
-> - Which files to merge into a single slide, which to split across multiple, which to skip.
+> **Step 1 — State the PR thesis.** Before picking slides, write the thesis: a single sentence (≤15 words) of what this PR is *really* about. Examples: *"Splits the claim CTA into Payvet and classical flows."* / *"Backfills the contracts.kind column in three batches."* Every slide you emit must serve this thesis. If a slide doesn't, drop it.
 >
-> Every file with `must_show: true` must appear somewhere.
+> **Step 2 — Pick the PR shape.** One of: `feature | refactor | fix | integration | migration | mixed`. Use the playbooks in `references/narrative-patterns.md` for ordering hints. Compute from the analyzer entries: many `change_type: "added"` and a coherent feature area → `feature`; high delete/add ratio with no behavior change → `refactor`; tiny diff with one bug → `fix`; new external SDK + webhook handler → `integration`; migration + backfill → `migration`; otherwise → `mixed`.
+>
+> **Step 3 — Pick the slide budget.** Tracks complexity, not line count. **14 is a hard ceiling.**
+> - **Tiny / easy** (single concern, ≤2 risky files, ≤200 lines) → **2-3 slides** (cover + 1 code + outro, or cover + outro for docs-only).
+> - **Normal** (single feature/fix/refactor with a few moving parts) → **5-9 slides**.
+> - **Exceptionally complex** (cross-cutting refactor, migration with backfill, new integration with 3+ touchpoints) → **10-14 slides**.
+> When torn between two budgets, pick the lower one. A 6-slide deck a reviewer reads beats a 10-slide deck they skip.
+>
+> **Step 4 — Compute `est_read_seconds`.** ~10s per cover/section/skipped/outro slide, ~15s per `risk` slide, ~25s per `code` slide. Surface as `meta.est_read_seconds` on the cover.
+>
+> **Step 5 — Order and select slides.**
+> - Default ordering: cover → (optional section) → code slides (most-risky first when risk-heavy; user-facing-intent first when feature-heavy) → optional `risk` slide for cross-cutting risks → `skipped` → outro.
+> - Every file with `must_consider: true` must end up somewhere: a code slide, a grouped bullet on a section/outro, or a line on the Skipped slide. Never silently dropped.
+> - Files with `boilerplate: true` go on the Skipped slide (grouped by category) — not on code slides.
+> - Files with low `interesting_score` (<0.4) and no `must_consider` flag also land on Skipped, grouped.
+> - Use a `risk` slide only when ≥2 cross-cutting risks exist that don't anchor to a single file/line, or one risk is too important to bury in a code-slide callout.
+>
+> **Step 6 — Always include a Skipped slide** unless the PR is genuinely tiny (≤2 files OR ≤30 lines changed). Even on small PRs with 5+ files, the reviewer benefits from seeing the curator's judgment about what was uninteresting.
 >
 > **Bullet rules — enforce these on every slide you emit:**
 > - ≤5 bullets per slide.
@@ -195,39 +245,59 @@ Dispatch a `story-architect` subagent with the file entries from Phase 2 plus th
 > - No prose paragraphs. No "narration". No trailing summaries.
 > - **`[risk]` bullets must convey the consequence**, not just label/locate. If it can't fit in 12 words, use the object form `{ "text": "[risk] ...", "why": "consequence in ≤25 words" }` — never emit a `[risk]` bullet that doesn't tell the reviewer what could go wrong.
 >
-> Return a JSON array of slide specs matching this contract exactly:
+> Return a JSON object matching this contract exactly:
 >
 > ```json
-> [
->   { "kind": "cover", "title": "Notification center, v1",
->     "subtitle": "Three endpoints, one inbox, no more polling",
->     "bullets": [
->       "[new] dual-flow CTA splits classical vs Payvet",
->       { "text": "[risk] **token rotation** moves to the gateway",
->         "why": "Old in-app rotator stays wired up; double rotation if the gateway flag flips before deploy." },
->       "==first slice== of the realtime project"
->     ],
->     "meta": { "author": "tbenhamou", "branch": "feat/notifs", "lines_added": 142, "lines_removed": 33, "files_changed": 7 } },
+> {
+>   "thesis": "Adds a notification center with three endpoints and an inbox.",
+>   "slides": [
+>     { "kind": "cover", "title": "Notification center, v1",
+>       "subtitle": "Three endpoints, one inbox, no more polling",
+>       "bullets": [
+>         "[new] dual-flow CTA splits classical vs Payvet",
+>         { "text": "[risk] **token rotation** moves to the gateway",
+>           "why": "Old in-app rotator stays wired up; double rotation if the gateway flag flips before deploy." },
+>         "==first slice== of the realtime project"
+>       ],
+>       "meta": { "author": "tbenhamou", "branch": "feat/notifs",
+>                 "lines_added": 142, "lines_removed": 33, "files_changed": 7,
+>                 "shape": "feature", "est_read_seconds": 90 } },
 >
->   { "kind": "section", "title": "The API", "caption": "Three endpoints wrap the domain",
->     "bullets": ["[new] `GET /notifications`", "[new] `POST /notifications/:id/dismiss`", "[refactor] auth moves to middleware"] },
+>     { "kind": "section", "title": "The API", "caption": "Three endpoints wrap the domain",
+>       "bullets": ["[new] `GET /notifications`", "[new] `POST /notifications/:id/dismiss`", "[refactor] auth moves to middleware"] },
 >
->   { "kind": "code", "title": "Three new endpoints",
->     "caption": "Wraps the domain API and adds the dismiss path",
->     "file": "src/notifications/api.ts",
->     "file_url": "https://gitlab.com/.../diffs#abc123" },
+>     { "kind": "code", "title": "Three new endpoints",
+>       "caption": "Wraps the domain API and adds the dismiss path",
+>       "file": "src/notifications/api.ts",
+>       "file_url": "https://gitlab.com/.../diffs#abc123" },
 >
->   { "kind": "outro", "title": "Worth a look",
->     "bullets": [
->       { "text": "[risk] new auth middleware on every route",
->         "why": "Bypass on a typo would silently expose the inbox API; no integration test covers the deny path yet." },
->       "==14 files==, mostly tests"
->     ],
->     "mr_url": "...", "files_changed": 14 }
-> ]
+>     { "kind": "risk", "title": "What could break",
+>       "caption": "Two risks not pinned to a single line",
+>       "bullets": [
+>         { "text": "[risk] new auth middleware on every route",
+>           "why": "Bypass on a typo would silently expose the inbox API; no integration test covers the deny path yet." },
+>         { "text": "[risk] feature flag default off",
+>           "why": "Off-path is what ships to staging — the new code is dark-launched and untested in prod-shape data." }
+>       ] },
+>
+>     { "kind": "skipped", "title": "Not in the deck",
+>       "caption": "Skim these in the platform UI",
+>       "groups": [
+>         { "label": "snapshot updates", "count": 8 },
+>         { "label": "type-only changes", "count": 3 },
+>         { "label": "doc tweaks", "count": 1 }
+>       ] },
+>
+>     { "kind": "outro", "title": "Where to start",
+>       "bullets": ["start in ==NotificationService.markAllRead==", "[risk] no test for null inbox"],
+>       "mr_url": "...", "files_changed": 14 }
+>   ]
+> }
 > ```
 >
 > For `code` slides you only emit `title`, `caption`, `file`, and `file_url`. The curator fills in `diff` and `callouts` in Phase 4.
+>
+> The `thesis` field is for downstream phases — the curator and builder use it to keep slides on-message. Keep it ≤15 words, plain text.
 
 **If `--dry-run`:** stop here, print the outline, exit.
 
@@ -275,7 +345,10 @@ The builder must:
 4. Render code slides:
    - Embed the unified diff inside `<script type="application/x-diff" class="slide-diff">…</script>` — the deck.js runtime hands it to diff2html.
    - Embed callouts inside `<script type="application/json" class="slide-callouts">[…]</script>` — the runtime overlays rough.js sketches keyed by `line`.
-5. Write a `manifest.json` with MR id, generation timestamp, commit SHA, and the slide spec — so re-runs can diff and the deck is reproducible.
+5. Render `risk` slides as `<section class="slide" data-kind="risk">` with `<h2>{title}</h2>`, optional `<p class="caption">{caption}</p>`, and the bullet list under `<ul class="bullets">`. Same bullet rendering rules as cover/section/outro.
+6. Render `skipped` slides as `<section class="slide" data-kind="skipped">` with `<h2>{title}</h2>`, optional `<p class="caption">{caption}</p>`, and a `<ul class="skipped-groups">` of `<li><span class="skipped-count">{count}</span> {label}</li>` rows. No tags, no markdown, no highlighter — plain text only.
+7. Render the cover meta with the full set of fields — author, branch, +/− line counts, files_changed, **shape**, and **est_read_seconds**. Format per the cover spec in `assets/deck-template/README.md`. Missing optional fields render gracefully (no empty span).
+8. Write a `manifest.json` with MR id, generation timestamp, commit SHA, the thesis, and the slide spec — so re-runs can diff and the deck is reproducible.
 
 The hand-drawn theme (rough.js sketches, highlighter spans, tag chips, the persistent keyboard hint above the arrows) is the template's job. The builder must not reimplement it — it only produces the bullet/diff/callout HTML the runtime expects.
 
@@ -309,9 +382,10 @@ If the user previously answered for this session, do not ask again — but each 
 
 ## Edge cases
 
-- **Empty/tiny MR (< 10 lines changed):** generate a 3-slide mini-deck — cover, one code slide, outro. Bullets only, no section slide.
+- **Empty/tiny MR (< 10 lines changed):** generate a 2-slide mini-deck — cover + outro. Bullets only, no code slide, no Skipped.
+- **Tiny MR (10–30 lines, ≤2 files):** 2-3 slides — cover + (optional 1 code slide if the change is non-trivial) + outro. No Skipped slide.
 - **Docs-only MR:** skip code curation, generate a 2-slide summary (cover + outro), bullets only.
-- **Huge MR (> 2000 lines):** cap at 14 slides, bias toward must-shows, add a "Not covered" slide whose bullets list the skipped files (`[skipped] path/to/file.ts`).
+- **Huge MR (> 2000 lines):** still capped at 14 slides. Bias toward `must_consider` files with high `interesting_score`. Use a `risk` slide if cross-cutting risks exist. Skipped slide is mandatory and groups the long tail by category.
 - **Deck already exists at target path:** prompt before overwriting.
 - **Detached HEAD / no MR for branch:** ask the user for an explicit MR URL.
 
@@ -325,6 +399,6 @@ If the user previously answered for this session, do not ask again — but each 
 
 ## References
 
-- `references/heuristics.md` — the must-show patterns used by `diff-analyzer`.
+- `references/heuristics.md` — the must-consider and deprioritize patterns used by `diff-analyzer`.
 - `references/narrative-patterns.md` — slide archetypes and example bullets by MR type (feature, refactor, fix, integration).
 - `assets/deck-template/` — HTML/CSS/JS scaffolding and slide-type contracts.
