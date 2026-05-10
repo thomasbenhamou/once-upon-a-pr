@@ -6,10 +6,9 @@ Interactive MR/PR walkthrough deck generator.
 
 ![Sample deck walkthrough](docs/demo.gif)
 
-### Sample decks
+### Sample deck
 
-- [`sample.html`](.claude/skills/tell-me-a-pr/assets/deck-template/sample.html) — small change (4 files, "add a bio field"). Quick look at the format.
-- [`sample-rate-limit.html`](.claude/skills/tell-me-a-pr/assets/deck-template/sample-rate-limit.html) — realistic 12-file feature: Redis primitive → middleware → 3 routes → frontend cooldown → Datadog alert → tests. The kind of PR `tell-me-a-pr` is built for.
+- [`sample.html`](.claude/skills/tell-me-a-pr/assets/deck-template/sample.html) — "Add bio to user profiles", 5 slides. Quick look at the format: cover, section, code slides with sketchy callouts, outro.
 
 Run it on your own MR to get one of these.
 
@@ -44,7 +43,7 @@ In Claude Code:
 - No arg → current branch's open MR.
 - `--dry-run` → stop after the narrative outline, print, exit.
 
-Deck lands at `docs/tell-me-a-pr/<mr-id>/`, gets committed and pushed, and a link is posted on the MR.
+Deck lands at `docs/tell-me-a-pr/<slug>/<slug>.html` (slug = `<mr-id>-<title-slug>`), gets committed and pushed, and a link is posted on the MR.
 
 ## What it does
 
