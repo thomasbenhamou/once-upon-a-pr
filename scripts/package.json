@@ -1,0 +1,11 @@
+{
+  "name": "tell-me-a-pr-scripts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "record": "node record-demo.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}
