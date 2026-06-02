@@ -53,7 +53,7 @@ When the consequence can't fit the 12-word cap, use the **object form** instead 
 - `why` is a one-liner explaining the consequence or failure mode. ≤25 words. Plain text, no markdown.
 - The builder renders `why` as a dimmed italic line beneath the bullet.
 
-Use the object form **only** when needed — most bullets are still bare strings. It is mandatory whenever the bullet starts with `[risk]` and the consequence isn't already plainly stated in the text.
+Use the object form **only** when needed — most bullets are still bare strings. It is mandatory whenever the bullet starts with `[risk]` and the consequence isn't already plainly stated in the text. Exception: bullets on a dedicated `risk` slide always use object form so they can carry `why`, `file`, and `file_url`.
 
 ---
 
@@ -77,8 +77,13 @@ This is the source of truth. It must match `assets/deck-template/README.md` and 
 { "kind": "risk", "title": "...", "caption": "...",
   "bullets": [
     { "text": "[risk] **token rotation** moves to gateway",
-      "why": "Old in-app rotator stays wired up — double rotation if the flag flips before deploy." },
-    "[risk] feature flag default off; **off-path** untested"
+      "why": "Old in-app rotator stays wired up — double rotation if the flag flips before deploy.",
+      "file": "src/auth/token-rotation.ts",
+      "file_url": "https://.../diffs#abc" },
+    { "text": "[risk] feature flag default off; **off-path** untested",
+      "why": "Staging exercises the off-path first; prod-shape data can break unseen.",
+      "file": "src/flags/notifications.ts",
+      "file_url": "https://.../diffs#def" }
   ] }
 
 { "kind": "code", "title": "...", "caption": "...",
@@ -139,6 +144,7 @@ Dispatch an `mr-fetcher` subagent with `$ARGUMENTS` (may be a URL, a branch name
 >    - GitLab: `glab mr view <id> --output json` and `glab mr diff <id> > /tmp/tell-me-a-pr-<mr-id>/diff.patch`
 >    - GitHub: `gh pr view <id> --json title,body,author,baseRefName,headRefName,commits,additions,deletions,changedFiles,url` and `gh pr diff <id> > /tmp/tell-me-a-pr-<mr-id>/diff.patch`
 >    - Always redirect the diff straight to disk. Do not load it into your context.
+>    - Compute `files_url` for fallback review links: GitLab → `<mr_url>/diffs`; GitHub → `<mr_url>/files`.
 >
 > 4. **Extract the linked Jira/issue key** by regex on the description (e.g. `[A-Z]+-\d+`). First match wins; null if none.
 >
@@ -153,6 +159,7 @@ Dispatch an `mr-fetcher` subagent with `$ARGUMENTS` (may be a URL, a branch name
 >   "platform": "gitlab|github",
 >   "mr_id": "123",
 >   "mr_url": "https://...",
+>   "files_url": "https://.../diffs-or-files",
 >   "title": "...",
 >   "slug": "1234-add-notification-center-v1",
 >   "description_excerpt": "first 500 chars...",
@@ -234,6 +241,7 @@ Dispatch a `story-architect` subagent with the file entries from Phase 2 plus th
 > - Files with `boilerplate: true` go on the Skipped slide (grouped by category) — not on code slides.
 > - Files with low `interesting_score` (<0.4) and no `must_consider` flag also land on Skipped, grouped.
 > - Use a `risk` slide only when ≥2 cross-cutting risks exist that don't anchor to a single file/line, or one risk is too important to bury in a code-slide callout.
+> - Every bullet on a `risk` slide must use object form with `text`, `why`, `file`, and `file_url`. Pick the best changed file to inspect first. For truly cross-file risks, choose the primary review starting point and mention the broader surface in `why`. If the exact diff anchor is unavailable, use `files_url` as a fallback URL rather than omitting the link.
 >
 > **Step 6 — Always include a Skipped slide** unless the PR is genuinely tiny (≤2 files OR ≤30 lines changed). Even on small PRs with 5+ files, the reviewer benefits from seeing the curator's judgment about what was uninteresting.
 >
@@ -245,6 +253,7 @@ Dispatch a `story-architect` subagent with the file entries from Phase 2 plus th
 > - Highlighter (`==phrase==`) for the one thing the eye should land on, ≤2 per slide.
 > - No prose paragraphs. No "narration". No trailing summaries.
 > - **`[risk]` bullets must convey the consequence**, not just label/locate. If it can't fit in 12 words, use the object form `{ "text": "[risk] ...", "why": "consequence in ≤25 words" }` — never emit a `[risk]` bullet that doesn't tell the reviewer what could go wrong.
+> - On `risk` slides, every bullet must be object-form and include `file` and `file_url`, pointing to the best changed file for review. Prefer a platform diff/file anchor; fallback to the MR files/diffs page.
 >
 > Return a JSON object matching this contract exactly:
 >
@@ -276,9 +285,13 @@ Dispatch a `story-architect` subagent with the file entries from Phase 2 plus th
 >       "caption": "Two risks not pinned to a single line",
 >       "bullets": [
 >         { "text": "[risk] new auth middleware on every route",
->           "why": "Bypass on a typo would silently expose the inbox API; no integration test covers the deny path yet." },
+>           "why": "Bypass on a typo would silently expose the inbox API; no integration test covers the deny path yet.",
+>           "file": "src/http/auth-middleware.ts",
+>           "file_url": "https://gitlab.com/.../diffs#auth-middleware" },
 >         { "text": "[risk] feature flag default off",
->           "why": "Off-path is what ships to staging — the new code is dark-launched and untested in prod-shape data." }
+>           "why": "Off-path is what ships to staging — the new code is dark-launched and untested in prod-shape data.",
+>           "file": "src/notifications/flags.ts",
+>           "file_url": "https://gitlab.com/.../diffs#flags" }
 >       ] },
 >
 >     { "kind": "skipped", "title": "Not in the deck",
@@ -346,8 +359,8 @@ The builder must:
 1. Copy `assets/deck-template/` to `docs/tell-me-a-pr/<slug>/`, then rename the copied `index.html` to `<slug>.html`.
 2. Replace the `<!-- SLIDES -->` placeholder in `<slug>.html` with the generated `<section class="slide">` blocks. Also replace the `<title>…</title>` tag's contents with `<slug>` so the browser tab shows the PR slug.
 3. Render bullets:
-   - Each bullet entry is either a string or an object `{ "text": "...", "why": "..." }`. For object form, render `why` as a dimmed italic `<span class="bullet-why">…</span>` beneath the bullet text. Both forms otherwise follow the same rules below.
-   - Strip `[tag]` prefixes from the start of the bullet text and render them as `<span class="chip chip--<tag>">tag</span>`.
+   - Each bullet entry is either a string or an object `{ "text": "...", "why": "...", "file": "...", "file_url": "..." }`. For object form, render `why` as a dimmed italic `<span class="bullet-why">…</span>` beneath the bullet text. When `file` and `file_url` are present, render a separate `<a class="bullet-file-link" href="…" target="_blank" rel="noreferrer">Review {file}</a>` beneath `why`. Both forms otherwise follow the same rules below.
+   - Strip `[tag]` prefixes from the start of the bullet text and render them as `<span class="tag tag-<tag>">tag</span>`.
    - Convert `**phrase**` → `<strong>phrase</strong>`.
    - Convert `==phrase==` → `<mark>phrase</mark>`.
    - `why` is plain text — escape, do not run markdown on it.
@@ -355,7 +368,7 @@ The builder must:
    - Embed the unified diff inside `<script type="application/x-diff" class="slide-diff">…</script>` — the deck.js runtime hands it to diff2html.
    - Before rendering, validate every callout against its slide's final `diff`: side/line exists, `line_text` matches the target row after trimming repeated whitespace, risk callouts have `why`, and no anchor lands on a blank/brace/comment-only line unless the note is about that line. Retry the curator once if validation fails.
    - Embed callouts inside `<script type="application/json" class="slide-callouts">[…]</script>` — the runtime overlays rough.js sketches keyed by `side` + `line` + `line_text`.
-5. Render `risk` slides as `<section class="slide" data-kind="risk">` with `<h2>{title}</h2>`, optional `<p class="caption">{caption}</p>`, and the bullet list under `<ul class="bullets">`. Same bullet rendering rules as cover/section/outro.
+5. Render `risk` slides as `<section class="slide" data-kind="risk">` with `<h2>{title}</h2>`, optional `<p class="caption">{caption}</p>`, and the bullet list under `<ul class="bullets">`. Same bullet rendering rules as cover/section/outro, plus the per-risk file link for object bullets with `file` and `file_url`.
 6. Render `skipped` slides as `<section class="slide" data-kind="skipped">` with `<h2>{title}</h2>`, optional `<p class="caption">{caption}</p>`, and a `<ul class="skipped-groups">` of `<li><span class="skipped-count">{count}</span> {label}</li>` rows. No tags, no markdown, no highlighter — plain text only.
 7. Render the cover meta with the full set of fields — author, branch, +/− line counts, files_changed, **shape**, and **est_read_seconds**. Format per the cover spec in `assets/deck-template/README.md`. Missing optional fields render gracefully (no empty span).
 8. Write a `manifest.json` with MR id, generation timestamp, commit SHA, the thesis, and the slide spec — so re-runs can diff and the deck is reproducible.

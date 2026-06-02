@@ -486,6 +486,20 @@ mark {
   opacity: 0.62;
   line-height: 1.3;
 }
+.bullets li .bullet-file-link {
+  display: inline-block;
+  margin-top: 7px;
+  margin-left: 2px;
+  color: var(--denim);
+  font-size: 0.78em;
+  line-height: 1.2;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+.bullets li .bullet-file-link:hover {
+  color: var(--terracotta);
+}
 
 /* ---------- risk slide ---------- */
 .slide[data-kind="risk"] {
@@ -529,6 +543,9 @@ mark {
 .slide[data-kind="risk"] .bullet-why {
   font-size: 0.86em;
   opacity: 0.7;
+}
+.slide[data-kind="risk"] .bullet-file-link {
+  font-size: 0.78em;
 }
 
 /* ---------- skipped slide ---------- */

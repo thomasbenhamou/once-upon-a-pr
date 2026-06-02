@@ -52,9 +52,13 @@ The builder consumes a JSON array of slide specs. Slide kinds: `cover`, `section
     "caption": "Two risks not pinned to a single line",
     "bullets": [
       { "text": "[risk] Payvet flag default off in staging",
-        "why": "Off-path ships dark-launched; QA hits classical only, Payvet path untested in staging." },
+        "why": "Off-path ships dark-launched; QA hits classical only, Payvet path untested in staging.",
+        "file": "src/claims/detail/ClaimCta.tsx",
+        "file_url": "https://gitlab.com/.../diffs#payvet-flag" },
       { "text": "[risk] no rollback for the **kind** backfill",
-        "why": "Once written, undoing requires another migration. Coordinate with ops before the merge window." }
+        "why": "Once written, undoing requires another migration. Coordinate with ops before the merge window.",
+        "file": "db/migrations/20260426_backfill_kind.sql",
+        "file_url": "https://gitlab.com/.../diffs#kind-backfill" }
     ] },
 
   { "kind": "code", "title": "Two CTAs, one resolver",
@@ -83,7 +87,7 @@ The builder consumes a JSON array of slide specs. Slide kinds: `cover`, `section
 ]
 ```
 
-Bullets are either bare strings (most cases) or objects `{ "text": "...", "why": "..." }`. The object form is required when a `[risk]` bullet's consequence can't fit the 12-word cap on `text` — `why` carries the failure mode and renders as a dimmed italic line beneath the bullet.
+Bullets are either bare strings (most cases) or objects `{ "text": "...", "why": "...", "file": "...", "file_url": "..." }`. The object form is required when a `[risk]` bullet's consequence can't fit the 12-word cap on `text` — `why` carries the failure mode and renders as a dimmed italic line beneath the bullet. On `risk` slides, every bullet must use object form with `file` and `file_url` so each listed risk links to the best changed file to inspect first.
 
 ### Slide-budget contract
 
@@ -197,9 +201,13 @@ Slide count tracks PR complexity, not size. **14 is a hard ceiling.**
   "caption": "Two risks not pinned to a single line",
   "bullets": [
     { "text": "[risk] **token rotation** moves to gateway",
-      "why": "Old in-app rotator stays wired up — double rotation if the flag flips before deploy." },
+      "why": "Old in-app rotator stays wired up — double rotation if the flag flips before deploy.",
+      "file": "src/auth/token-rotation.ts",
+      "file_url": "https://gitlab.com/.../diffs#token-rotation" },
     { "text": "[risk] feature flag default off",
-      "why": "Off-path is what ships to staging; the new code is dark-launched and untested in prod-shape data." }
+      "why": "Off-path is what ships to staging; the new code is dark-launched and untested in prod-shape data.",
+      "file": "src/notifications/flags.ts",
+      "file_url": "https://gitlab.com/.../diffs#notification-flags" }
   ] }
 ```
 
@@ -207,13 +215,21 @@ Slide count tracks PR complexity, not size. **14 is a hard ceiling.**
 <section class="slide" data-kind="risk">
   <h2>{{title}}</h2>
   <p class="caption">{{caption}}</p>
-  <ul class="bullets">{{#bullets}}<li>{{rendered bullet}}</li>{{/bullets}}</ul>
+  <ul class="bullets">
+    {{#bullets}}
+      <li>
+        {{rendered bullet}}
+        <span class="bullet-why">{{why}}</span>
+        <a class="bullet-file-link" href="{{file_url}}" target="_blank" rel="noreferrer">Review {{file}}</a>
+      </li>
+    {{/bullets}}
+  </ul>
 </section>
 ```
 
-- Same bullet rendering rules as `cover`/`section`/`outro`: tag chips, bold, highlighter, optional `why` line.
+- Same bullet rendering rules as `cover`/`section`/`outro`: tag chips, bold, highlighter, `why` line, file link.
 - Use only when there are ≥2 cross-cutting risks that don't anchor to a single file/line, or a single risk too important to bury in a code-slide callout.
-- Almost every bullet here uses the object form (text + why) — naming the consequence is the whole point.
+- Every bullet here uses the object form (text + why + file + file_url) — naming the consequence and linking the review starting point is the whole point.
 
 ### `skipped`
 
@@ -263,9 +279,9 @@ Slide count tracks PR complexity, not size. **14 is a hard ceiling.**
 The deck-builder applies these rules **in order** when turning a bullet entry
 into HTML. They are not optional — they are the contract.
 
-A bullet entry is either a string or an object `{ "text": "...", "why": "..." }`.
+A bullet entry is either a string or an object `{ "text": "...", "why": "...", "file": "...", "file_url": "..." }`.
 For object entries, treat `text` as the bullet string for steps 1–3, then append
-the `why` rendering described in step 4.
+the optional `why` and file-link renderings described in steps 4–5.
 
 1. **Tag prefix.** If the bullet starts with one of:
    `[risk]`, `[new]`, `[fix]`, `[breaking]`, `[refactor]`
@@ -282,6 +298,10 @@ the `why` rendering described in step 4.
    emit a sibling `<span class="bullet-why">{why}</span>` after the bullet
    text. `why` is plain text — HTML-escape it; no markdown, no chips, no
    highlighter. Renders as a dimmed italic line under the bullet.
+5. **File link (object form only).** If the entry is an object with both `file`
+   and `file_url`, emit a sibling `<a class="bullet-file-link" href="{file_url}"
+   target="_blank" rel="noreferrer">Review {file}</a>` after `why`. Escape both
+   values; `file_url` is an attribute value.
 
 ### Hard caps (the architect must respect these)
 
