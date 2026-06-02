@@ -4,7 +4,10 @@ Interactive MR/PR walkthrough deck generator.
 
 > AI ships bigger PRs. GitHub still hands the reviewer a flat diff. **`tell-me-a-pr`** turns the diff into a short narrated deck — so a reviewer lands on the *intent* and the *risky bits* before the line-by-line work.
 
-![Sample deck walkthrough](docs/demo.gif)
+![React Flight PR walkthrough deck demo](docs/demo.gif)
+
+Demo recorded from a generated walkthrough for
+[facebook/react#35632](https://github.com/facebook/react/pull/35632).
 
 ### Sample deck
 
