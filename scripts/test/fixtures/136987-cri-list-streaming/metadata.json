@@ -1,0 +1,23 @@
+{
+  "platform": "github",
+  "mr_id": "136987",
+  "mr_url": "https://github.com/kubernetes/kubernetes/pull/136987",
+  "files_url": "https://github.com/kubernetes/kubernetes/pull/136987/files",
+  "title": "[KEP-5825] cri-api: Add streaming RPCs for CRI list operations",
+  "slug": "136987-kep-5825-cri-api-add-streaming-rpcs-for-cri-list",
+  "description_excerpt": "Adds streaming list RPCs for CRI operations.",
+  "author": "bitoku",
+  "base": "master",
+  "head": "kep-5825-cri",
+  "commits": [
+    {
+      "sha": "fa4710ad0098310c7d57798078d9df84087960a7",
+      "subject": "cri-api: add streaming RPCs"
+    }
+  ],
+  "files_changed": 19,
+  "lines_added": 4140,
+  "lines_removed": 2292,
+  "jira_key": "KEP-5825",
+  "diff_path": "/tmp/once-upon-a-pr-136987/diff.patch"
+}

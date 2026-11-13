@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>134768-podlevelresourcemanagers-pod-level-resource</title>
+  <link rel="stylesheet" href="vendor/diff2html/diff2html.min.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="deck-header">
+    <span class="deck-title" id="deckTitle">Once Upon a PR</span>
+    <div class="deck-progress">
+      <span class="frac"><span id="slideIndex">1</span> / <span id="slideTotal">1</span></span>
+      <div class="bar" id="progressBar">
+        <svg class="bar-sketch" aria-hidden="true"></svg>
+        <div class="bar-fill" id="barFill"></div>
+      </div>
+    </div>
+  </header>
+
+  <main id="slides">
+    <section class="slide active" data-kind="cover">
+<h1>Pod Level Resource Managers</h1>
+<p class="subtitle">Kubelet allocates CPU, memory, and topology at pod scope</p>
+<ul class="bullets">
+<li><span class="tag tag-new">new</span> Pod-level resources reach Topology, CPU, and Memory managers</li>
+<li><span class="tag tag-new">new</span> pod budget becomes a shared allocation bubble</li>
+<li><span class="tag tag-risk">risk</span> <strong>checkpoint</strong> format adds pod assignments<span class="bullet-why">Bad migration would lose existing pinned resources on kubelet restart.</span></li>
+<li><mark>55 files</mark>, mostly manager logic plus exhaustive node tests</li>
+</ul>
+<div class="meta"><span class="shape shape-feature">feature</span>
+<span><strong>by</strong> KevinTMtz</span>
+<span><strong>branch</strong> pod-level-resource-managers-5526</span>
+<span><strong>+8976</strong>/<strong>-688</strong></span>
+<span><strong>55</strong> files</span>
+<span class="read-time">~4m 20s read</span></div>
+</section>
+
+<section class="slide" data-kind="section">
+<h2>Resource Shape</h2>
+<p class="caption">The feature starts by defining which containers own resources.</p>
+<ul class="bullets">
+<li><span class="tag tag-new">new</span> feature gate hangs from KEP-5526</li>
+<li><span class="tag tag-new">new</span> QoS helper recognizes <mark>container-level</mark> guarantees</li>
+<li><span class="tag tag-new">new</span> isolation levels split host, pod, and container ownership</li>
+</ul>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>The Alpha Gate</h3>
+<a class="file-link" href="https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f66656174" target="_blank" rel="noreferrer">pkg/features/kube_features.go</a>
+</div>
+<p class="caption">Adds PodLevelResourceManagers behind the Kubernetes feature gate.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/pkg/features/kube_features.go b/pkg/features/kube_features.go
+index ff1af01ec5edd..0608fb1ca2ad9 100644
+--- a/pkg/features/kube_features.go
++++ b/pkg/features/kube_features.go
+@@ -679,6 +679,13 @@ const (
+ 	// Enables controlling pod ranking on replicaset scale-down.
+ 	PodDeletionCost featuregate.Feature = "PodDeletionCost"
+ 
++	// owner: @KevinTMtz
++	// kep: https://kep.k8s.io/5526
++	//
++	// PodLevelResourceManagers enables pod-level resource management in the Topology, CPU, and Memory managers.
++	// This feature depends on the PodLevelResources feature.
++	PodLevelResourceManagers featuregate.Feature = "PodLevelResourceManagers"
++
+ 	// owner: @ndixita
+ 	// key: https://kep.k8s.io/2837
+ 	//</script>
+<script type="application/json" class="slide-callouts">[{"line":684,"note":"new alpha feature flag","kind":"info"},{"line":685,"note":"depends on pod.spec.resources","kind":"warn","why":"Managers must stay disabled unless PodLevelResources is also active."}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>Guarantee Means Container-Exact</h3>
+<a class="file-link" href="https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f6b756265" target="_blank" rel="noreferrer">pkg/kubelet/cm/qos/helpers.go</a>
+</div>
+<p class="caption">Defines the QoS predicate used before exclusive allocation.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/pkg/kubelet/cm/qos/helpers.go b/pkg/kubelet/cm/qos/helpers.go
+index 0000000000000..30b14cc6aa323
+--- /dev/null
++++ b/pkg/kubelet/cm/qos/helpers.go
+@@ -0,0 +1,43 @@
++/*
++Copyright 2025 The Kubernetes Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package qos
++
++import (
++	v1 "k8s.io/api/core/v1"
++)
++
++// IsContainerEquivalentQOSGuaranteed checks if a container is considered Guaranteed
++// from the perspective of resource managers that allocate exclusive resources.
++// This requires the container to have both requests and limits set and equal
++// for both CPU and Memory.
++func IsContainerEquivalentQOSGuaranteed(container *v1.Container) bool {
++	// Check container-level CPU requests and limits are equal.
++	cpuRequest := container.Resources.Requests[v1.ResourceCPU]
++	cpuLimit := container.Resources.Limits[v1.ResourceCPU]
++	if cpuRequest.IsZero() || !cpuRequest.Equal(cpuLimit) {
++		return false
++	}
++
++	// Check container-level Memory requests and limits are equal.
++	memRequest := container.Resources.Requests[v1.ResourceMemory]
++	memLimit := container.Resources.Limits[v1.ResourceMemory]
++	if memRequest.IsZero() || !memRequest.Equal(memLimit) {
++		return false
++	}
++
++	return true
++}</script>
+<script type="application/json" class="slide-callouts">[{"line":25,"note":"requires equal CPU request and limit","kind":"info"},{"line":34,"note":"memory must match too","kind":"info"}]</script>
+</section>
+
+<section class="slide" data-kind="section">
+<h2>Admission Path</h2>
+<p class="caption">Pod scope now decides whether managers allocate once per pod.</p>
+<ul class="bullets">
+<li><span class="tag tag-new">new</span> Topology Manager branches before container admission</li>
+<li><span class="tag tag-new">new</span> AllocatePod runs after a single pod hint</li>
+<li><span class="tag tag-risk">risk</span> failed pod allocation rejects admission immediately</li>
+</ul>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>Pod-Scope Admission Branch</h3>
+<a class="file-link" href="https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f6b756265" target="_blank" rel="noreferrer">pkg/kubelet/cm/topologymanager/scope_pod.go</a>
+</div>
+<p class="caption">Routes pod-level specs into the new one-time allocation path.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/pkg/kubelet/cm/topologymanager/scope_pod.go b/pkg/kubelet/cm/topologymanager/scope_pod.go
+index 8498ccbd89a04..21df862ef116d 100644
+--- a/pkg/kubelet/cm/topologymanager/scope_pod.go
++++ b/pkg/kubelet/cm/topologymanager/scope_pod.go
+@@ -47,17 +50,21 @@ func NewPodScope(policy Policy) Scope {
+ }
+ 
+ func (s *podScope) Admit(ctx context.Context, pod *v1.Pod) lifecycle.PodAdmitResult {
++	// If the PodLevelResourceManagers feature is enabled, delegate the resource
++	// allocation to the hint providers (CPU and Memory managers) via the AllocatePod call.
++	// This is a one-time allocation for the entire pod.
++	if utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResourceManagers) && resourcehelper.IsPodLevelResourcesSet(pod) {
++		return s.admitUsingPodResources(ctx, pod)
++	}
++	return s.admitUsingContainerResources(ctx, pod)
++}
++
++func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod) lifecycle.PodAdmitResult {
+ 	logger := klog.FromContext(ctx)
+ 
+-	bestHint, admit := s.calculateAffinity(logger, pod)
+-	logger.Info("Best TopologyHint", "bestHint", bestHint, "pod", klog.KObj(pod))
++	bestHint, admit := s.checkAffinity(logger, pod)
+ 	if !admit {
+-		if IsAlignmentGuaranteed(s.policy) {
+-			// increment only if we know we allocate aligned resources.
+-			metrics.ContainerAlignedComputeResourcesFailure.WithLabelValues(metrics.AlignScopePod, metrics.AlignedNUMANode).Inc()
+-		}
+-		metrics.TopologyManagerAdmissionErrorsTotal.Inc()
+-		return admission.GetPodAdmitResult(&TopologyAffinityError{})
++		return admission.GetPodAdmitResult(NewTopologyAffinityError())
+ 	}
+ 
+ 	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+@@ -70,12 +77,63 @@ func (s *podScope) Admit(ctx context.Context, pod *v1.Pod) lifecycle.PodAdmitRes
+ 			return admission.GetPodAdmitResult(err)
+ 		}
+ 	}
++
++	s.updateSuccessMetrics(logger, pod)
++	return admission.GetPodAdmitResult(nil)
++}
++
++func (s *podScope) admitUsingPodResources(ctx context.Context, pod *v1.Pod) lifecycle.PodAdmitResult {
++	logger := klog.FromContext(ctx)
++
++	bestHint, admit := s.checkAffinity(logger, pod)
++	if !admit {
++		return admission.GetPodAdmitResult(NewPodLevelTopologyAffinityError("pod with pod-level resources failed admission under pod-scope topology manager"))
++	}
++
++	// If the PodLevelResourceManagers feature is enabled, delegate the resource
++	// allocation to the hint providers (CPU and Memory managers) via the AllocatePod call.
++	// This is a one-time allocation for the entire pod.
++	logger.V(4).Info("Calling AllocatePod on hint providers", "pod", klog.KObj(pod))
++
++	// Store the best hint for all containers.
++	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
++		logger.Info("Topology Affinity", "bestHint", bestHint, "pod", klog.KObj(pod), "containerName", container.Name)
++		s.setTopologyHints(string(pod.UID), container.Name, bestHint)
++	}
++
++	err := s.allocatePodAlignedResources(pod)
++	if err != nil {
++		logger.Error(err, "Pod-level allocation failed", "pod", klog.KObj(pod))
++		metrics.TopologyManagerAdmissionErrorsTotal.Inc()
++		return admission.GetPodAdmitResult(err)
++	}
++
++	s.updateSuccessMetrics(logger, pod)</script>
+<script type="application/json" class="slide-callouts">[{"line":55,"note":"feature gate selects pod path","kind":"warn"},{"line":90,"note":"stores one best hint per container","kind":"info"},{"line":94,"note":"allocation failure blocks admission","kind":"risk","why":"A manager bug rejects the whole pod before containers can start."}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>CPU Bubble And Empty Pool Guard</h3>
+<a class="file-link" href="https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f6b756265" target="_blank" rel="noreferrer">pkg/kubelet/cm/cpumanager/policy_static.go</a>
+</div>
+<p class="caption">Rejects pods whose exclusive CPUs consume the shared pool.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/pkg/kubelet/cm/cpumanager/policy_static.go b/pkg/kubelet/cm/cpumanager/policy_static.go
+index 53519390c45d8..c6149654b36f3 100644
+--- a/pkg/kubelet/cm/cpumanager/policy_static.go
++++ b/pkg/kubelet/cm/cpumanager/policy_static.go
+@@ -262,6 +265,11 @@ func (p *staticPolicy) validateState(logger logr.Logger, s state.State) error {
+ 			tmpCPUSets = append(tmpCPUSets, cset)
+ 		}
+ 	}
++	if utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResourceManagers) {
++		for _, podAssigments := range s.GetPodCPUAssignments() {
++			tmpCPUSets = append(tmpCPUSets, podAssigments.CPUSet)
++		}
++	}
+ 	totalKnownCPUs = totalKnownCPUs.Union(tmpCPUSets...)
+ 	if !totalKnownCPUs.Equals(allCPUs) {
+ 		return fmt.Errorf("current set of available CPUs %q doesn't match with CPUs in state %q",
+@@ -316,6 +324,239 @@ func (p *staticPolicy) updateCPUsToReuse(pod *v1.Pod, container *v1.Container, c
+ 	p.cpusToReuse[string(pod.UID)] = p.cpusToReuse[string(pod.UID)].Difference(cset)
+ }
+ 
++// validatePodScopeResources checks for the "empty shared pool" scenario. This occurs
++// when the sum of exclusive container CPU requests consumes the entire pod-level
++// budget, leaving no CPUs for containers that require a shared pool. Such a
++// configuration is invalid because it would lead to containers in the shared
++// pool having an empty cpuset, causing them to run on the node's shared pool
++// and breaking NUMA affinity.
++func (p *staticPolicy) validatePodScopeResources(logger logr.Logger, pod *v1.Pod) error {
++	podTotalCPUs := p.podGuaranteedCPUs(logger, pod)
++
++	hasSharedLongRunningContainers := false
++	// Sum CPU requests for all containers that run for the full pod lifetime
++	// (main containers and restartable init containers) to determine the
++	// total exclusive CPU usage that might impact the shared pool.
++	sumOfLongRunningExclusiveCPUs := 0
++
++	// Check for empty shared pool for standard init containers.
++	for _, container := range pod.Spec.InitContainers {
++		guaranteedCPUs := p.guaranteedCPUs(logger, pod, &container)
++
++		if !podutil.IsRestartableInitContainer(&container) {
++			if guaranteedCPUs == 0 && sumOfLongRunningExclusiveCPUs >= podTotalCPUs {
++				// This check ensures that if there are any standard init containers that need a
++				// shared pool, that pool is not empty. An empty pool would occur if the pod
++				// budget is fully consumed by sidecars.
++				return fmt.Errorf("pod rejected, pod has shared init containers but no cpus available for them")
++			}
++		} else {
++			// If there are restartable init containers, keep track for the empty shared pool check.
++			if guaranteedCPUs == 0 {
++				hasSharedLongRunningContainers = true
++			} else {
++				sumOfLongRunningExclusiveCPUs += guaranteedCPUs
++			}
++		}
++	}
++
++	// Check for empty shared pool for concurrently running containers (app and restartable init containers).
++	for _, container := range pod.Spec.Containers {
++		guaranteedCPUs := p.guaranteedCPUs(logger, pod, &container)
++
++		if guaranteedCPUs == 0 {
++			hasSharedLongRunningContainers = true
++		} else {
++			sumOfLongRunningExclusiveCPUs += guaranteedCPUs
++		}
++	}
++
++	// This check ensures that if there are any standard containers that need a shared
++	// pool, that pool is not empty. An empty pool would occur if the pod budget is
++	// fully consumed by sidecars and main containers with exclusive resources.</script>
+<script type="application/json" class="slide-callouts">[{"line":267,"note":"restored pod CPU sets count","kind":"warn"},{"line":331,"note":"empty shared pool is invalid","kind":"risk","why":"Shared containers would escape NUMA affinity and run on node-wide CPUs."},{"line":390,"note":"AllocatePod owns pod-level CPU partitioning","kind":"info"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>Memory Bubble Mirrors CPU</h3>
+<a class="file-link" href="https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f6b756265" target="_blank" rel="noreferrer">pkg/kubelet/cm/memorymanager/policy_static.go</a>
+</div>
+<p class="caption">Applies the same shared-pool guard to memory resources.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/pkg/kubelet/cm/memorymanager/policy_static.go b/pkg/kubelet/cm/memorymanager/policy_static.go
+index eb5c3b5f67c32..16b3b4a637b12 100644
+--- a/pkg/kubelet/cm/memorymanager/policy_static.go
++++ b/pkg/kubelet/cm/memorymanager/policy_static.go
+@@ -94,28 +98,353 @@ func (p *staticPolicy) Start(logger klog.Logger, s state.State) error {
+ 	return nil
+ }
+ 
++// validatePodScopeResources checks for the "empty shared pool" scenario. This
++// occurs when the sum of exclusive container memory requests consumes the
++// entire pod-level budget, leaving no memory for containers that require a
++// shared pool. Such a configuration is invalid because it would lead to
++// containers in the shared pool having no memory allocated, causing them to
++// fail.
++func (p *staticPolicy) validatePodScopeResources(logger logr.Logger, pod *v1.Pod) error {
++	podTotalMemory, err := getPodRequestedResources(logger, pod)
++	if err != nil {
++		return err
++	}
++
++	hasSharedLongRunningContainers := false
++	// Sum memory requests for all containers that run for the full pod lifetime
++	// (main containers and restartable init containers) to determine the
++	// total exclusive memory usage that might impact the shared pool.
++	sumOfLongRunningExclusiveMemory := make(map[v1.ResourceName]uint64)
++
++	// Check for empty shared pool for standard init containers.
++	for _, container := range pod.Spec.InitContainers {
++		containerReqs, err := getContainerRequestedResources(logger, pod, &container)
++		if err != nil {
++			return err
++		}
++
++		if !podutil.IsRestartableInitContainer(&container) {
++			if len(containerReqs) == 0 {
++				// This check ensures that if there are any standard init containers that need a
++				// shared pool, that pool is not empty. An empty pool would occur if the pod
++				// budget is fully consumed by sidecars.
++				for resourceName, poolSize := range podTotalMemory {
++					if sumOfLongRunningExclusiveMemory[resourceName] >= poolSize {
++						return fmt.Errorf("pod rejected, pod has shared init containers but no %s available for them", resourceName)
++					}
++				}
++			}
++		} else {
++			// If there are restartable init containers, keep track for the empty shared pool check.
++			if len(containerReqs) == 0 {
++				hasSharedLongRunningContainers = true
++			} else {
++				for resourceName, reqAmount := range containerReqs {
++					sumOfLongRunningExclusiveMemory[resourceName] += reqAmount
++				}
++			}
++		}
++	}
++
++	// Check for empty shared pool for concurrently running containers (app and restartable init containers).
++	for _, container := range pod.Spec.Containers {
++		containerReqs, err := getContainerRequestedResources(logger, pod, &container)
++		if err != nil {
++			return err
++		}
++
++		if len(containerReqs) == 0 {
++			hasSharedLongRunningContainers = true
++		} else {</script>
+<script type="application/json" class="slide-callouts">[{"line":99,"note":"same empty-pool invariant","kind":"risk","why":"A shared container with no memory allocation cannot start reliably."},{"line":108,"note":"pod budget read once","kind":"info"},{"line":148,"note":"checks every requested resource","kind":"warn"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>Checkpoint Migration Grows Up</h3>
+<a class="file-link" href="https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f6b756265" target="_blank" rel="noreferrer">pkg/kubelet/cm/cpumanager/state/state_checkpoint.go</a>
+</div>
+<p class="caption">CPU state migrates to V3 and persists pod assignments.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/pkg/kubelet/cm/cpumanager/state/state_checkpoint.go b/pkg/kubelet/cm/cpumanager/state/state_checkpoint.go
+index 9774bf3728717..1b03ee273c268 100644
+--- a/pkg/kubelet/cm/cpumanager/state/state_checkpoint.go
++++ b/pkg/kubelet/cm/cpumanager/state/state_checkpoint.go
+@@ -92,48 +96,85 @@ func (sc *stateCheckpoint) migrateV1CheckpointToV2Checkpoint(src *CPUManagerChec
+ 	return nil
+ }
+ 
++// migrateV2CheckpointToV3Checkpoint() converts checkpoints from the v1 format to the v2 format
++func (sc *stateCheckpoint) migrateV2CheckpointToV3Checkpoint(src *CPUManagerCheckpointV2, dst *CPUManagerCheckpointV3) {
++	if src.PolicyName != "" {
++		dst.PolicyName = src.PolicyName
++	}
++	if src.DefaultCPUSet != "" {
++		dst.DefaultCPUSet = src.DefaultCPUSet
++	}
++	if len(src.Entries) > 0 {
++		dst.Entries = make(map[string]map[string]string, len(src.Entries))
++		for podUID, containerEntries := range src.Entries {
++			dst.Entries[podUID] = make(map[string]string, len(containerEntries))
++			maps.Copy(dst.Entries[podUID], containerEntries)
++		}
++	}
++}
++
+ // restores state from a checkpoint and creates it if it doesn't exist
+ func (sc *stateCheckpoint) restoreState() error {
+ 	sc.mux.Lock()
+ 	defer sc.mux.Unlock()
+-	var err error
+ 
+-	checkpointV1 := newCPUManagerCheckpointV1()
+-	checkpointV2 := newCPUManagerCheckpointV2()
+-
+-	if err = sc.checkpointManager.GetCheckpoint(sc.checkpointName, checkpointV1); err != nil {
+-		checkpointV1 = &CPUManagerCheckpointV1{} // reset it back to 0
+-		if err = sc.checkpointManager.GetCheckpoint(sc.checkpointName, checkpointV2); err != nil {
+-			if err == errors.ErrCheckpointNotFound {
+-				return sc.storeState()
+-			}
+-			return err
+-		}
+-	}
+-
+-	if err = sc.migrateV1CheckpointToV2Checkpoint(checkpointV1, checkpointV2); err != nil {
+-		return fmt.Errorf("error migrating v1 checkpoint state to v2 checkpoint state: %s", err)
++	var checkpoint any
++	var err error
++	if utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResourceManagers) {
++		checkpoint, err = sc.loadAndMigrateCheckpointV3()
++	} else {
++		checkpoint, err = sc.loadAndMigrateCheckpointV2()
+ 	}
+ 
+-	if sc.policyName != checkpointV2.PolicyName {
+-		return fmt.Errorf("configured policy %q differs from state checkpoint policy %q", sc.policyName, checkpointV2.PolicyName)
++	if err != nil {
++		if errors.Is(err, cperrors.ErrCheckpointNotFound) {
++			return sc.storeState()
++		}
++		return err
+ 	}
+ 
+ 	var tmpDefaultCPUSet cpuset.CPUSet
+-	if tmpDefaultCPUSet, err = cpuset.Parse(checkpointV2.DefaultCPUSet); err != nil {
+-		return fmt.Errorf("could not parse default cpu set %q: %v", checkpointV2.DefaultCPUSet, err)
+-	}
+-
+ 	var tmpContainerCPUSet cpuset.CPUSet
+ 	tmpAssignments := ContainerCPUAssignments{}
+-	for pod := range checkpointV2.Entries {
+-		tmpAssignments[pod] = make(map[string]cpuset.CPUSet, len(checkpointV2.Entries[pod]))
+-		for container, cpuString := range checkpointV2.Entries[pod] {
+-			if tmpContainerCPUSet, err = cpuset.Parse(cpuString); err != nil {</script>
+<script type="application/json" class="slide-callouts">[{"line":98,"note":"V2 entries copy into V3","kind":"info"},{"line":356,"note":"new pod-level assignment API","kind":"warn"},{"line":435,"note":"DeletePod only removes pod assignments","kind":"risk","why":"Container assignments intentionally survive; cleanup ordering needs reviewer attention."}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>Runtime Pinning Queries Change Semantics</h3>
+<a class="file-link" href="https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f6b756265" target="_blank" rel="noreferrer">pkg/kubelet/cm/container_manager_linux.go</a>
+</div>
+<p class="caption">Exclusive CPU checks now ask the manager for isolation level.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/pkg/kubelet/cm/container_manager_linux.go b/pkg/kubelet/cm/container_manager_linux.go
+index 88e93c10b5f31..8ec4e78635f3c 100644
+--- a/pkg/kubelet/cm/container_manager_linux.go
++++ b/pkg/kubelet/cm/container_manager_linux.go
+@@ -417,6 +419,18 @@ func (cm *containerManagerImpl) PodHasExclusiveCPUs(pod *v1.Pod) bool {
+ 	// Use klog.TODO() because we currently do not have a proper logger to pass in.
+ 	// Replace this with an appropriate logger when refactoring this function to accept a logger parameter.
+ 	logger := klog.TODO()
++
++	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.PodLevelResourceManagers) && resourcehelper.IsPodLevelResourcesSet(pod) {
++		for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
++			if cm.cpuManager.GetResourceIsolationLevel(pod, &container) != cmqos.ResourceIsolationContainer {
++				return false
++			}
++		}
++
++		logger.V(4).Info("Pod has pinned cpus", "podName", pod.Name)
++		return true
++	}
++
+ 	return podHasExclusiveCPUs(logger, cm.cpuManager, pod)
+ }
+ 
+@@ -424,6 +438,16 @@ func (cm *containerManagerImpl) ContainerHasExclusiveCPUs(pod *v1.Pod, container
+ 	// Use klog.TODO() because we currently do not have a proper logger to pass in.
+ 	// Replace this with an appropriate logger when refactoring this function to accept a logger parameter.
+ 	logger := klog.TODO()
++
++	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.PodLevelResourceManagers) {
++		if cm.cpuManager.GetResourceIsolationLevel(pod, container) != cmqos.ResourceIsolationContainer {
++			return false
++		}
++
++		logger.V(4).Info("Container has pinned cpus", "podName", pod.Name, "containerName", container.Name)
++		return true
++	}
++
+ 	return containerHasExclusiveCPUs(logger, cm.cpuManager, pod, container)
+ }
+ </script>
+<script type="application/json" class="slide-callouts">[{"line":422,"note":"all containers must be container-isolated","kind":"warn"},{"line":443,"note":"container check bypasses legacy helper","kind":"info"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>Node E2E Covers The New Surface</h3>
+<a class="file-link" href="https://github.com/kubernetes/kubernetes/pull/134768/files#diff-746573742f653265" target="_blank" rel="noreferrer">test/e2e_node/memory_manager_test.go</a>
+</div>
+<p class="caption">Tests verify allocations through podresources, not just specs.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/test/e2e_node/memory_manager_test.go b/test/e2e_node/memory_manager_test.go
+index c28f5d4eb4a75..ee624d2e15356 100644
+--- a/test/e2e_node/memory_manager_test.go
++++ b/test/e2e_node/memory_manager_test.go
+@@ -251,6 +262,74 @@ func verifyMemoryPinning(f *framework.Framework, ctx context.Context, pod *v1.Po
+ 	gomega.Expect(numaNodeIDs).To(gomega.Equal(currentNUMANodeIDs.List()))
+ }
+ 
++func verifyMemoryManagerAllocations(ctx context.Context, pod *v1.Pod, expectedGuaranteedContainers []string, expectedSharedMemorySize int64) {
++	ginkgo.GinkgoHelper()
++	ginkgo.By("Verifying memory manager allocations via pod resource API")
++	endpoint, err := util.LocalEndpoint(defaultPodResourcesPath, podresources.Socket)
++	framework.ExpectNoError(err)
++
++	cli, conn, err := podresources.GetV1Client(endpoint, defaultPodResourcesTimeout, defaultPodResourcesMaxSize)
++	framework.ExpectNoError(err)
++	defer conn.Close() //nolint:errcheck
++
++	gomega.Eventually(ctx, func(ctx context.Context) error {
++		_, err := cli.List(ctx, &kubeletpodresourcesv1.ListPodResourcesRequest{})
++		return err
++	}).WithTimeout(time.Minute).WithPolling(5 * time.Second).Should(gomega.Succeed())
++	resp, err := cli.List(ctx, &kubeletpodresourcesv1.ListPodResourcesRequest{})
++	framework.ExpectNoError(err)
++
++	expectedGuaranteedSet := sets.NewString(expectedGuaranteedContainers...)
++
++	for _, podResource := range resp.PodResources {
++		if podResource.Name != pod.Name {
++			continue
++		}
++
++		for _, containerResource := range podResource.Containers {
++			// find the container in the pod spec
++			var containerSpec *v1.Container
++			for i := range pod.Spec.Containers {
++				if pod.Spec.Containers[i].Name == containerResource.Name {
++					containerSpec = &pod.Spec.Containers[i]
++					break
++				}
++			}
++			if containerSpec == nil {
++				// could be an init container
++				for i := range pod.Spec.InitContainers {
++					if pod.Spec.InitContainers[i].Name == containerResource.Name {
++						containerSpec = &pod.Spec.InitContainers[i]
++						break
++					}
++				}
++			}
++			gomega.Expect(containerSpec).ToNot(gomega.BeNil(), "container spec for %s not found", containerResource.Name)
++
++			if expectedGuaranteedSet.Has(containerResource.Name) {
++				gomega.Expect(containerResource.Memory).ToNot(gomega.BeEmpty(), "expected memory resources for container %s", containerResource.Name)
++				for _, mem := range containerResource.Memory {
++					q := containerSpec.Resources.Limits[v1.ResourceName(mem.MemoryType)]
++					val, ok := q.AsInt64()
++					gomega.Expect(ok).To(gomega.BeTrueBecause("cannot convert value to integer"))
++					gomega.Expect(val).To(gomega.BeEquivalentTo(mem.Size))
++				}
++			} else {
++				if expectedSharedMemorySize > 0 {
++					gomega.Expect(containerResource.Memory).ToNot(gomega.BeEmpty(), "expected memory resources for non-guaranteed container %s", containerResource.Name)
++					var totalAllocated uint64
++					for _, mem := range containerResource.Memory {
++						totalAllocated += mem.Size
++					}
++					gomega.Expect(totalAllocated).To(gomega.BeEquivalentTo(expectedSharedMemorySize), "container %s memory should match shared pool size", containerResource.Name)
++				} else {
++					gomega.Expect(containerResource.Memory).To(gomega.BeEmpty(), "expected no memory resources for container %s", containerResource.Name)
++				}
++			}</script>
+<script type="application/json" class="slide-callouts">[{"line":265,"note":"uses podresources API","kind":"info"},{"line":287,"note":"matches container specs by name","kind":"warn"},{"line":311,"note":"shared memory pool is asserted","kind":"info"}]</script>
+</section>
+
+<section class="slide" data-kind="risk">
+<h2>What Could Break</h2>
+<p class="caption">The review risk is mostly cross-manager consistency.</p>
+<ul class="bullets">
+<li><span class="tag tag-risk">risk</span> <strong>feature gates</strong> must move together<span class="bullet-why">PodLevelResourceManagers assumes PodLevelResources is enabled wherever pod.spec.resources appears.</span></li>
+<li><span class="tag tag-risk">risk</span> CPU and Memory guards must match<span class="bullet-why">Divergent empty-pool handling would admit pods one manager cannot allocate.</span></li>
+<li><span class="tag tag-risk">risk</span> checkpoint fallback hides corrupt V3 reads<span class="bullet-why">A bad V3 read can fall back to V2, losing pod assignments until rebuild.</span></li>
+<li><span class="tag tag-risk">risk</span> tests are mostly node-shape dependent<span class="bullet-why">Insufficient NUMA or CPU topology can skip the exact cases reviewers care about.</span></li>
+</ul>
+</section>
+
+<section class="slide" data-kind="skipped">
+<h2>Not In The Deck</h2>
+<p class="caption">Skim these in GitHub after the core path lands.</p>
+<ul class="skipped-groups">
+<li><span class="skipped-count">16</span> large test matrices</li>
+<li><span class="skipped-count">8</span> checkpoint mirrors</li>
+<li><span class="skipped-count">4</span> fake managers</li>
+<li><span class="skipped-count">4</span> feature references</li>
+<li><span class="skipped-count">7</span> small interface hooks</li>
+<li><span class="skipped-count">10</span> routine managers</li>
+</ul>
+</section>
+
+<section class="slide" data-kind="outro">
+<h2>Where To Start</h2>
+<ul class="bullets">
+<li>Start in <mark>scope_pod.go</mark> to trace admission</li>
+<li><span class="tag tag-risk">risk</span> review CPU and Memory empty-pool symmetry</li>
+<li><span class="tag tag-risk">risk</span> inspect checkpoint migration before kubelet restart</li>
+<li><span class="tag tag-new">new</span> skim e2e skips for hardware assumptions</li>
+</ul>
+<a class="mr-cta" href="https://github.com/kubernetes/kubernetes/pull/134768" target="_blank" rel="noreferrer">Open the MR -></a>
+<div class="deck-meta">55 files changed</div>
+</section>
+  </main>
+
+  <nav class="deck-nav" aria-label="Slide navigation">
+    <div class="kbd-hint" id="kbdHint">
+      <svg class="kbd-frame" aria-hidden="true"></svg>
+      <span class="kbd-caption">
+        <span class="kbd-glyph" aria-hidden="true">&#9000;</span>
+        <span class="kbd-keys">&#9664;&nbsp;&#9654;</span>
+        <span class="kbd-text">to navigate</span>
+      </span>
+    </div>
+    <div class="nav-buttons">
+      <button id="prevBtn" class="nav-btn" aria-label="Previous slide">
+        <svg class="nav-sketch" aria-hidden="true"></svg>
+        <span class="nav-arrow">&#9664;</span>
+      </button>
+      <button id="nextBtn" class="nav-btn" aria-label="Next slide">
+        <svg class="nav-sketch" aria-hidden="true"></svg>
+        <span class="nav-arrow">&#9654;</span>
+      </button>
+    </div>
+  </nav>
+
+  <script id="manifest" type="application/json">
+    {
+  "mr_id": "134768",
+  "mr_title": "[PodLevelResourceManagers] Pod Level Resource Managers - Alpha",
+  "mr_url": "https://github.com/kubernetes/kubernetes/pull/134768",
+  "generated_at": "2026-06-02T08:48:23.800Z",
+  "commit_sha": "dec79e1fb25bfffd67e8079880231ceea34ed94f",
+  "thesis": "Extends Kubelet managers to allocate pod-level resource budgets.",
+  "slides": [
+    {
+      "kind": "cover",
+      "title": "Pod Level Resource Managers",
+      "subtitle": "Kubelet allocates CPU, memory, and topology at pod scope",
+      "bullets": [
+        "[new] Pod-level resources reach Topology, CPU, and Memory managers",
+        "[new] pod budget becomes a shared allocation bubble",
+        {
+          "text": "[risk] **checkpoint** format adds pod assignments",
+          "why": "Bad migration would lose existing pinned resources on kubelet restart."
+        },
+        "==55 files==, mostly manager logic plus exhaustive node tests"
+      ],
+      "meta": {
+        "author": "KevinTMtz",
+        "branch": "pod-level-resource-managers-5526",
+        "lines_added": 8976,
+        "lines_removed": 688,
+        "files_changed": 55,
+        "shape": "feature",
+        "est_read_seconds": 260
+      }
+    },
+    {
+      "kind": "section",
+      "title": "Resource Shape",
+      "caption": "The feature starts by defining which containers own resources.",
+      "bullets": [
+        "[new] feature gate hangs from KEP-5526",
+        "[new] QoS helper recognizes ==container-level== guarantees",
+        "[new] isolation levels split host, pod, and container ownership"
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "The Alpha Gate",
+      "caption": "Adds PodLevelResourceManagers behind the Kubernetes feature gate.",
+      "file": "pkg/features/kube_features.go",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f66656174",
+      "diff": "diff --git a/pkg/features/kube_features.go b/pkg/features/kube_features.go\nindex ff1af01ec5edd..0608fb1ca2ad9 100644\n--- a/pkg/features/kube_features.go\n+++ b/pkg/features/kube_features.go\n@@ -679,6 +679,13 @@ const (\n \t// Enables controlling pod ranking on replicaset scale-down.\n \tPodDeletionCost featuregate.Feature = \"PodDeletionCost\"\n \n+\t// owner: @KevinTMtz\n+\t// kep: https://kep.k8s.io/5526\n+\t//\n+\t// PodLevelResourceManagers enables pod-level resource management in the Topology, CPU, and Memory managers.\n+\t// This feature depends on the PodLevelResources feature.\n+\tPodLevelResourceManagers featuregate.Feature = \"PodLevelResourceManagers\"\n+\n \t// owner: @ndixita\n \t// key: https://kep.k8s.io/2837\n \t//",
+      "callouts": [
+        {
+          "line": 684,
+          "note": "new alpha feature flag",
+          "kind": "info"
+        },
+        {
+          "line": 685,
+          "note": "depends on pod.spec.resources",
+          "kind": "warn",
+          "why": "Managers must stay disabled unless PodLevelResources is also active."
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Guarantee Means Container-Exact",
+      "caption": "Defines the QoS predicate used before exclusive allocation.",
+      "file": "pkg/kubelet/cm/qos/helpers.go",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f6b756265",
+      "diff": "diff --git a/pkg/kubelet/cm/qos/helpers.go b/pkg/kubelet/cm/qos/helpers.go\nindex 0000000000000..30b14cc6aa323\n--- /dev/null\n+++ b/pkg/kubelet/cm/qos/helpers.go\n@@ -0,0 +1,43 @@\n+/*\n+Copyright 2025 The Kubernetes Authors.\n+\n+Licensed under the Apache License, Version 2.0 (the \"License\");\n+you may not use this file except in compliance with the License.\n+You may obtain a copy of the License at\n+\n+    http://www.apache.org/licenses/LICENSE-2.0\n+\n+Unless required by applicable law or agreed to in writing, software\n+distributed under the License is distributed on an \"AS IS\" BASIS,\n+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n+See the License for the specific language governing permissions and\n+limitations under the License.\n+*/\n+\n+package qos\n+\n+import (\n+\tv1 \"k8s.io/api/core/v1\"\n+)\n+\n+// IsContainerEquivalentQOSGuaranteed checks if a container is considered Guaranteed\n+// from the perspective of resource managers that allocate exclusive resources.\n+// This requires the container to have both requests and limits set and equal\n+// for both CPU and Memory.\n+func IsContainerEquivalentQOSGuaranteed(container *v1.Container) bool {\n+\t// Check container-level CPU requests and limits are equal.\n+\tcpuRequest := container.Resources.Requests[v1.ResourceCPU]\n+\tcpuLimit := container.Resources.Limits[v1.ResourceCPU]\n+\tif cpuRequest.IsZero() || !cpuRequest.Equal(cpuLimit) {\n+\t\treturn false\n+\t}\n+\n+\t// Check container-level Memory requests and limits are equal.\n+\tmemRequest := container.Resources.Requests[v1.ResourceMemory]\n+\tmemLimit := container.Resources.Limits[v1.ResourceMemory]\n+\tif memRequest.IsZero() || !memRequest.Equal(memLimit) {\n+\t\treturn false\n+\t}\n+\n+\treturn true\n+}",
+      "callouts": [
+        {
+          "line": 25,
+          "note": "requires equal CPU request and limit",
+          "kind": "info"
+        },
+        {
+          "line": 34,
+          "note": "memory must match too",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "section",
+      "title": "Admission Path",
+      "caption": "Pod scope now decides whether managers allocate once per pod.",
+      "bullets": [
+        "[new] Topology Manager branches before container admission",
+        "[new] AllocatePod runs after a single pod hint",
+        "[risk] failed pod allocation rejects admission immediately"
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Pod-Scope Admission Branch",
+      "caption": "Routes pod-level specs into the new one-time allocation path.",
+      "file": "pkg/kubelet/cm/topologymanager/scope_pod.go",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f6b756265",
+      "diff": "diff --git a/pkg/kubelet/cm/topologymanager/scope_pod.go b/pkg/kubelet/cm/topologymanager/scope_pod.go\nindex 8498ccbd89a04..21df862ef116d 100644\n--- a/pkg/kubelet/cm/topologymanager/scope_pod.go\n+++ b/pkg/kubelet/cm/topologymanager/scope_pod.go\n@@ -47,17 +50,21 @@ func NewPodScope(policy Policy) Scope {\n }\n \n func (s *podScope) Admit(ctx context.Context, pod *v1.Pod) lifecycle.PodAdmitResult {\n+\t// If the PodLevelResourceManagers feature is enabled, delegate the resource\n+\t// allocation to the hint providers (CPU and Memory managers) via the AllocatePod call.\n+\t// This is a one-time allocation for the entire pod.\n+\tif utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResourceManagers) && resourcehelper.IsPodLevelResourcesSet(pod) {\n+\t\treturn s.admitUsingPodResources(ctx, pod)\n+\t}\n+\treturn s.admitUsingContainerResources(ctx, pod)\n+}\n+\n+func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod) lifecycle.PodAdmitResult {\n \tlogger := klog.FromContext(ctx)\n \n-\tbestHint, admit := s.calculateAffinity(logger, pod)\n-\tlogger.Info(\"Best TopologyHint\", \"bestHint\", bestHint, \"pod\", klog.KObj(pod))\n+\tbestHint, admit := s.checkAffinity(logger, pod)\n \tif !admit {\n-\t\tif IsAlignmentGuaranteed(s.policy) {\n-\t\t\t// increment only if we know we allocate aligned resources.\n-\t\t\tmetrics.ContainerAlignedComputeResourcesFailure.WithLabelValues(metrics.AlignScopePod, metrics.AlignedNUMANode).Inc()\n-\t\t}\n-\t\tmetrics.TopologyManagerAdmissionErrorsTotal.Inc()\n-\t\treturn admission.GetPodAdmitResult(&TopologyAffinityError{})\n+\t\treturn admission.GetPodAdmitResult(NewTopologyAffinityError())\n \t}\n \n \tfor _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {\n@@ -70,12 +77,63 @@ func (s *podScope) Admit(ctx context.Context, pod *v1.Pod) lifecycle.PodAdmitRes\n \t\t\treturn admission.GetPodAdmitResult(err)\n \t\t}\n \t}\n+\n+\ts.updateSuccessMetrics(logger, pod)\n+\treturn admission.GetPodAdmitResult(nil)\n+}\n+\n+func (s *podScope) admitUsingPodResources(ctx context.Context, pod *v1.Pod) lifecycle.PodAdmitResult {\n+\tlogger := klog.FromContext(ctx)\n+\n+\tbestHint, admit := s.checkAffinity(logger, pod)\n+\tif !admit {\n+\t\treturn admission.GetPodAdmitResult(NewPodLevelTopologyAffinityError(\"pod with pod-level resources failed admission under pod-scope topology manager\"))\n+\t}\n+\n+\t// If the PodLevelResourceManagers feature is enabled, delegate the resource\n+\t// allocation to the hint providers (CPU and Memory managers) via the AllocatePod call.\n+\t// This is a one-time allocation for the entire pod.\n+\tlogger.V(4).Info(\"Calling AllocatePod on hint providers\", \"pod\", klog.KObj(pod))\n+\n+\t// Store the best hint for all containers.\n+\tfor _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {\n+\t\tlogger.Info(\"Topology Affinity\", \"bestHint\", bestHint, \"pod\", klog.KObj(pod), \"containerName\", container.Name)\n+\t\ts.setTopologyHints(string(pod.UID), container.Name, bestHint)\n+\t}\n+\n+\terr := s.allocatePodAlignedResources(pod)\n+\tif err != nil {\n+\t\tlogger.Error(err, \"Pod-level allocation failed\", \"pod\", klog.KObj(pod))\n+\t\tmetrics.TopologyManagerAdmissionErrorsTotal.Inc()\n+\t\treturn admission.GetPodAdmitResult(err)\n+\t}\n+\n+\ts.updateSuccessMetrics(logger, pod)",
+      "callouts": [
+        {
+          "line": 55,
+          "note": "feature gate selects pod path",
+          "kind": "warn"
+        },
+        {
+          "line": 90,
+          "note": "stores one best hint per container",
+          "kind": "info"
+        },
+        {
+          "line": 94,
+          "note": "allocation failure blocks admission",
+          "kind": "risk",
+          "why": "A manager bug rejects the whole pod before containers can start."
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "CPU Bubble And Empty Pool Guard",
+      "caption": "Rejects pods whose exclusive CPUs consume the shared pool.",
+      "file": "pkg/kubelet/cm/cpumanager/policy_static.go",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f6b756265",
+      "diff": "diff --git a/pkg/kubelet/cm/cpumanager/policy_static.go b/pkg/kubelet/cm/cpumanager/policy_static.go\nindex 53519390c45d8..c6149654b36f3 100644\n--- a/pkg/kubelet/cm/cpumanager/policy_static.go\n+++ b/pkg/kubelet/cm/cpumanager/policy_static.go\n@@ -262,6 +265,11 @@ func (p *staticPolicy) validateState(logger logr.Logger, s state.State) error {\n \t\t\ttmpCPUSets = append(tmpCPUSets, cset)\n \t\t}\n \t}\n+\tif utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResourceManagers) {\n+\t\tfor _, podAssigments := range s.GetPodCPUAssignments() {\n+\t\t\ttmpCPUSets = append(tmpCPUSets, podAssigments.CPUSet)\n+\t\t}\n+\t}\n \ttotalKnownCPUs = totalKnownCPUs.Union(tmpCPUSets...)\n \tif !totalKnownCPUs.Equals(allCPUs) {\n \t\treturn fmt.Errorf(\"current set of available CPUs %q doesn't match with CPUs in state %q\",\n@@ -316,6 +324,239 @@ func (p *staticPolicy) updateCPUsToReuse(pod *v1.Pod, container *v1.Container, c\n \tp.cpusToReuse[string(pod.UID)] = p.cpusToReuse[string(pod.UID)].Difference(cset)\n }\n \n+// validatePodScopeResources checks for the \"empty shared pool\" scenario. This occurs\n+// when the sum of exclusive container CPU requests consumes the entire pod-level\n+// budget, leaving no CPUs for containers that require a shared pool. Such a\n+// configuration is invalid because it would lead to containers in the shared\n+// pool having an empty cpuset, causing them to run on the node's shared pool\n+// and breaking NUMA affinity.\n+func (p *staticPolicy) validatePodScopeResources(logger logr.Logger, pod *v1.Pod) error {\n+\tpodTotalCPUs := p.podGuaranteedCPUs(logger, pod)\n+\n+\thasSharedLongRunningContainers := false\n+\t// Sum CPU requests for all containers that run for the full pod lifetime\n+\t// (main containers and restartable init containers) to determine the\n+\t// total exclusive CPU usage that might impact the shared pool.\n+\tsumOfLongRunningExclusiveCPUs := 0\n+\n+\t// Check for empty shared pool for standard init containers.\n+\tfor _, container := range pod.Spec.InitContainers {\n+\t\tguaranteedCPUs := p.guaranteedCPUs(logger, pod, &container)\n+\n+\t\tif !podutil.IsRestartableInitContainer(&container) {\n+\t\t\tif guaranteedCPUs == 0 && sumOfLongRunningExclusiveCPUs >= podTotalCPUs {\n+\t\t\t\t// This check ensures that if there are any standard init containers that need a\n+\t\t\t\t// shared pool, that pool is not empty. An empty pool would occur if the pod\n+\t\t\t\t// budget is fully consumed by sidecars.\n+\t\t\t\treturn fmt.Errorf(\"pod rejected, pod has shared init containers but no cpus available for them\")\n+\t\t\t}\n+\t\t} else {\n+\t\t\t// If there are restartable init containers, keep track for the empty shared pool check.\n+\t\t\tif guaranteedCPUs == 0 {\n+\t\t\t\thasSharedLongRunningContainers = true\n+\t\t\t} else {\n+\t\t\t\tsumOfLongRunningExclusiveCPUs += guaranteedCPUs\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\t// Check for empty shared pool for concurrently running containers (app and restartable init containers).\n+\tfor _, container := range pod.Spec.Containers {\n+\t\tguaranteedCPUs := p.guaranteedCPUs(logger, pod, &container)\n+\n+\t\tif guaranteedCPUs == 0 {\n+\t\t\thasSharedLongRunningContainers = true\n+\t\t} else {\n+\t\t\tsumOfLongRunningExclusiveCPUs += guaranteedCPUs\n+\t\t}\n+\t}\n+\n+\t// This check ensures that if there are any standard containers that need a shared\n+\t// pool, that pool is not empty. An empty pool would occur if the pod budget is\n+\t// fully consumed by sidecars and main containers with exclusive resources.",
+      "callouts": [
+        {
+          "line": 267,
+          "note": "restored pod CPU sets count",
+          "kind": "warn"
+        },
+        {
+          "line": 331,
+          "note": "empty shared pool is invalid",
+          "kind": "risk",
+          "why": "Shared containers would escape NUMA affinity and run on node-wide CPUs."
+        },
+        {
+          "line": 390,
+          "note": "AllocatePod owns pod-level CPU partitioning",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Memory Bubble Mirrors CPU",
+      "caption": "Applies the same shared-pool guard to memory resources.",
+      "file": "pkg/kubelet/cm/memorymanager/policy_static.go",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f6b756265",
+      "diff": "diff --git a/pkg/kubelet/cm/memorymanager/policy_static.go b/pkg/kubelet/cm/memorymanager/policy_static.go\nindex eb5c3b5f67c32..16b3b4a637b12 100644\n--- a/pkg/kubelet/cm/memorymanager/policy_static.go\n+++ b/pkg/kubelet/cm/memorymanager/policy_static.go\n@@ -94,28 +98,353 @@ func (p *staticPolicy) Start(logger klog.Logger, s state.State) error {\n \treturn nil\n }\n \n+// validatePodScopeResources checks for the \"empty shared pool\" scenario. This\n+// occurs when the sum of exclusive container memory requests consumes the\n+// entire pod-level budget, leaving no memory for containers that require a\n+// shared pool. Such a configuration is invalid because it would lead to\n+// containers in the shared pool having no memory allocated, causing them to\n+// fail.\n+func (p *staticPolicy) validatePodScopeResources(logger logr.Logger, pod *v1.Pod) error {\n+\tpodTotalMemory, err := getPodRequestedResources(logger, pod)\n+\tif err != nil {\n+\t\treturn err\n+\t}\n+\n+\thasSharedLongRunningContainers := false\n+\t// Sum memory requests for all containers that run for the full pod lifetime\n+\t// (main containers and restartable init containers) to determine the\n+\t// total exclusive memory usage that might impact the shared pool.\n+\tsumOfLongRunningExclusiveMemory := make(map[v1.ResourceName]uint64)\n+\n+\t// Check for empty shared pool for standard init containers.\n+\tfor _, container := range pod.Spec.InitContainers {\n+\t\tcontainerReqs, err := getContainerRequestedResources(logger, pod, &container)\n+\t\tif err != nil {\n+\t\t\treturn err\n+\t\t}\n+\n+\t\tif !podutil.IsRestartableInitContainer(&container) {\n+\t\t\tif len(containerReqs) == 0 {\n+\t\t\t\t// This check ensures that if there are any standard init containers that need a\n+\t\t\t\t// shared pool, that pool is not empty. An empty pool would occur if the pod\n+\t\t\t\t// budget is fully consumed by sidecars.\n+\t\t\t\tfor resourceName, poolSize := range podTotalMemory {\n+\t\t\t\t\tif sumOfLongRunningExclusiveMemory[resourceName] >= poolSize {\n+\t\t\t\t\t\treturn fmt.Errorf(\"pod rejected, pod has shared init containers but no %s available for them\", resourceName)\n+\t\t\t\t\t}\n+\t\t\t\t}\n+\t\t\t}\n+\t\t} else {\n+\t\t\t// If there are restartable init containers, keep track for the empty shared pool check.\n+\t\t\tif len(containerReqs) == 0 {\n+\t\t\t\thasSharedLongRunningContainers = true\n+\t\t\t} else {\n+\t\t\t\tfor resourceName, reqAmount := range containerReqs {\n+\t\t\t\t\tsumOfLongRunningExclusiveMemory[resourceName] += reqAmount\n+\t\t\t\t}\n+\t\t\t}\n+\t\t}\n+\t}\n+\n+\t// Check for empty shared pool for concurrently running containers (app and restartable init containers).\n+\tfor _, container := range pod.Spec.Containers {\n+\t\tcontainerReqs, err := getContainerRequestedResources(logger, pod, &container)\n+\t\tif err != nil {\n+\t\t\treturn err\n+\t\t}\n+\n+\t\tif len(containerReqs) == 0 {\n+\t\t\thasSharedLongRunningContainers = true\n+\t\t} else {",
+      "callouts": [
+        {
+          "line": 99,
+          "note": "same empty-pool invariant",
+          "kind": "risk",
+          "why": "A shared container with no memory allocation cannot start reliably."
+        },
+        {
+          "line": 108,
+          "note": "pod budget read once",
+          "kind": "info"
+        },
+        {
+          "line": 148,
+          "note": "checks every requested resource",
+          "kind": "warn"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Checkpoint Migration Grows Up",
+      "caption": "CPU state migrates to V3 and persists pod assignments.",
+      "file": "pkg/kubelet/cm/cpumanager/state/state_checkpoint.go",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f6b756265",
+      "diff": "diff --git a/pkg/kubelet/cm/cpumanager/state/state_checkpoint.go b/pkg/kubelet/cm/cpumanager/state/state_checkpoint.go\nindex 9774bf3728717..1b03ee273c268 100644\n--- a/pkg/kubelet/cm/cpumanager/state/state_checkpoint.go\n+++ b/pkg/kubelet/cm/cpumanager/state/state_checkpoint.go\n@@ -92,48 +96,85 @@ func (sc *stateCheckpoint) migrateV1CheckpointToV2Checkpoint(src *CPUManagerChec\n \treturn nil\n }\n \n+// migrateV2CheckpointToV3Checkpoint() converts checkpoints from the v1 format to the v2 format\n+func (sc *stateCheckpoint) migrateV2CheckpointToV3Checkpoint(src *CPUManagerCheckpointV2, dst *CPUManagerCheckpointV3) {\n+\tif src.PolicyName != \"\" {\n+\t\tdst.PolicyName = src.PolicyName\n+\t}\n+\tif src.DefaultCPUSet != \"\" {\n+\t\tdst.DefaultCPUSet = src.DefaultCPUSet\n+\t}\n+\tif len(src.Entries) > 0 {\n+\t\tdst.Entries = make(map[string]map[string]string, len(src.Entries))\n+\t\tfor podUID, containerEntries := range src.Entries {\n+\t\t\tdst.Entries[podUID] = make(map[string]string, len(containerEntries))\n+\t\t\tmaps.Copy(dst.Entries[podUID], containerEntries)\n+\t\t}\n+\t}\n+}\n+\n // restores state from a checkpoint and creates it if it doesn't exist\n func (sc *stateCheckpoint) restoreState() error {\n \tsc.mux.Lock()\n \tdefer sc.mux.Unlock()\n-\tvar err error\n \n-\tcheckpointV1 := newCPUManagerCheckpointV1()\n-\tcheckpointV2 := newCPUManagerCheckpointV2()\n-\n-\tif err = sc.checkpointManager.GetCheckpoint(sc.checkpointName, checkpointV1); err != nil {\n-\t\tcheckpointV1 = &CPUManagerCheckpointV1{} // reset it back to 0\n-\t\tif err = sc.checkpointManager.GetCheckpoint(sc.checkpointName, checkpointV2); err != nil {\n-\t\t\tif err == errors.ErrCheckpointNotFound {\n-\t\t\t\treturn sc.storeState()\n-\t\t\t}\n-\t\t\treturn err\n-\t\t}\n-\t}\n-\n-\tif err = sc.migrateV1CheckpointToV2Checkpoint(checkpointV1, checkpointV2); err != nil {\n-\t\treturn fmt.Errorf(\"error migrating v1 checkpoint state to v2 checkpoint state: %s\", err)\n+\tvar checkpoint any\n+\tvar err error\n+\tif utilfeature.DefaultFeatureGate.Enabled(features.PodLevelResourceManagers) {\n+\t\tcheckpoint, err = sc.loadAndMigrateCheckpointV3()\n+\t} else {\n+\t\tcheckpoint, err = sc.loadAndMigrateCheckpointV2()\n \t}\n \n-\tif sc.policyName != checkpointV2.PolicyName {\n-\t\treturn fmt.Errorf(\"configured policy %q differs from state checkpoint policy %q\", sc.policyName, checkpointV2.PolicyName)\n+\tif err != nil {\n+\t\tif errors.Is(err, cperrors.ErrCheckpointNotFound) {\n+\t\t\treturn sc.storeState()\n+\t\t}\n+\t\treturn err\n \t}\n \n \tvar tmpDefaultCPUSet cpuset.CPUSet\n-\tif tmpDefaultCPUSet, err = cpuset.Parse(checkpointV2.DefaultCPUSet); err != nil {\n-\t\treturn fmt.Errorf(\"could not parse default cpu set %q: %v\", checkpointV2.DefaultCPUSet, err)\n-\t}\n-\n \tvar tmpContainerCPUSet cpuset.CPUSet\n \ttmpAssignments := ContainerCPUAssignments{}\n-\tfor pod := range checkpointV2.Entries {\n-\t\ttmpAssignments[pod] = make(map[string]cpuset.CPUSet, len(checkpointV2.Entries[pod]))\n-\t\tfor container, cpuString := range checkpointV2.Entries[pod] {\n-\t\t\tif tmpContainerCPUSet, err = cpuset.Parse(cpuString); err != nil {",
+      "callouts": [
+        {
+          "line": 98,
+          "note": "V2 entries copy into V3",
+          "kind": "info"
+        },
+        {
+          "line": 356,
+          "note": "new pod-level assignment API",
+          "kind": "warn"
+        },
+        {
+          "line": 435,
+          "note": "DeletePod only removes pod assignments",
+          "kind": "risk",
+          "why": "Container assignments intentionally survive; cleanup ordering needs reviewer attention."
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Runtime Pinning Queries Change Semantics",
+      "caption": "Exclusive CPU checks now ask the manager for isolation level.",
+      "file": "pkg/kubelet/cm/container_manager_linux.go",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/134768/files#diff-706b672f6b756265",
+      "diff": "diff --git a/pkg/kubelet/cm/container_manager_linux.go b/pkg/kubelet/cm/container_manager_linux.go\nindex 88e93c10b5f31..8ec4e78635f3c 100644\n--- a/pkg/kubelet/cm/container_manager_linux.go\n+++ b/pkg/kubelet/cm/container_manager_linux.go\n@@ -417,6 +419,18 @@ func (cm *containerManagerImpl) PodHasExclusiveCPUs(pod *v1.Pod) bool {\n \t// Use klog.TODO() because we currently do not have a proper logger to pass in.\n \t// Replace this with an appropriate logger when refactoring this function to accept a logger parameter.\n \tlogger := klog.TODO()\n+\n+\tif utilfeature.DefaultFeatureGate.Enabled(kubefeatures.PodLevelResourceManagers) && resourcehelper.IsPodLevelResourcesSet(pod) {\n+\t\tfor _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {\n+\t\t\tif cm.cpuManager.GetResourceIsolationLevel(pod, &container) != cmqos.ResourceIsolationContainer {\n+\t\t\t\treturn false\n+\t\t\t}\n+\t\t}\n+\n+\t\tlogger.V(4).Info(\"Pod has pinned cpus\", \"podName\", pod.Name)\n+\t\treturn true\n+\t}\n+\n \treturn podHasExclusiveCPUs(logger, cm.cpuManager, pod)\n }\n \n@@ -424,6 +438,16 @@ func (cm *containerManagerImpl) ContainerHasExclusiveCPUs(pod *v1.Pod, container\n \t// Use klog.TODO() because we currently do not have a proper logger to pass in.\n \t// Replace this with an appropriate logger when refactoring this function to accept a logger parameter.\n \tlogger := klog.TODO()\n+\n+\tif utilfeature.DefaultFeatureGate.Enabled(kubefeatures.PodLevelResourceManagers) {\n+\t\tif cm.cpuManager.GetResourceIsolationLevel(pod, container) != cmqos.ResourceIsolationContainer {\n+\t\t\treturn false\n+\t\t}\n+\n+\t\tlogger.V(4).Info(\"Container has pinned cpus\", \"podName\", pod.Name, \"containerName\", container.Name)\n+\t\treturn true\n+\t}\n+\n \treturn containerHasExclusiveCPUs(logger, cm.cpuManager, pod, container)\n }\n ",
+      "callouts": [
+        {
+          "line": 422,
+          "note": "all containers must be container-isolated",
+          "kind": "warn"
+        },
+        {
+          "line": 443,
+          "note": "container check bypasses legacy helper",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Node E2E Covers The New Surface",
+      "caption": "Tests verify allocations through podresources, not just specs.",
+      "file": "test/e2e_node/memory_manager_test.go",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/134768/files#diff-746573742f653265",
+      "diff": "diff --git a/test/e2e_node/memory_manager_test.go b/test/e2e_node/memory_manager_test.go\nindex c28f5d4eb4a75..ee624d2e15356 100644\n--- a/test/e2e_node/memory_manager_test.go\n+++ b/test/e2e_node/memory_manager_test.go\n@@ -251,6 +262,74 @@ func verifyMemoryPinning(f *framework.Framework, ctx context.Context, pod *v1.Po\n \tgomega.Expect(numaNodeIDs).To(gomega.Equal(currentNUMANodeIDs.List()))\n }\n \n+func verifyMemoryManagerAllocations(ctx context.Context, pod *v1.Pod, expectedGuaranteedContainers []string, expectedSharedMemorySize int64) {\n+\tginkgo.GinkgoHelper()\n+\tginkgo.By(\"Verifying memory manager allocations via pod resource API\")\n+\tendpoint, err := util.LocalEndpoint(defaultPodResourcesPath, podresources.Socket)\n+\tframework.ExpectNoError(err)\n+\n+\tcli, conn, err := podresources.GetV1Client(endpoint, defaultPodResourcesTimeout, defaultPodResourcesMaxSize)\n+\tframework.ExpectNoError(err)\n+\tdefer conn.Close() //nolint:errcheck\n+\n+\tgomega.Eventually(ctx, func(ctx context.Context) error {\n+\t\t_, err := cli.List(ctx, &kubeletpodresourcesv1.ListPodResourcesRequest{})\n+\t\treturn err\n+\t}).WithTimeout(time.Minute).WithPolling(5 * time.Second).Should(gomega.Succeed())\n+\tresp, err := cli.List(ctx, &kubeletpodresourcesv1.ListPodResourcesRequest{})\n+\tframework.ExpectNoError(err)\n+\n+\texpectedGuaranteedSet := sets.NewString(expectedGuaranteedContainers...)\n+\n+\tfor _, podResource := range resp.PodResources {\n+\t\tif podResource.Name != pod.Name {\n+\t\t\tcontinue\n+\t\t}\n+\n+\t\tfor _, containerResource := range podResource.Containers {\n+\t\t\t// find the container in the pod spec\n+\t\t\tvar containerSpec *v1.Container\n+\t\t\tfor i := range pod.Spec.Containers {\n+\t\t\t\tif pod.Spec.Containers[i].Name == containerResource.Name {\n+\t\t\t\t\tcontainerSpec = &pod.Spec.Containers[i]\n+\t\t\t\t\tbreak\n+\t\t\t\t}\n+\t\t\t}\n+\t\t\tif containerSpec == nil {\n+\t\t\t\t// could be an init container\n+\t\t\t\tfor i := range pod.Spec.InitContainers {\n+\t\t\t\t\tif pod.Spec.InitContainers[i].Name == containerResource.Name {\n+\t\t\t\t\t\tcontainerSpec = &pod.Spec.InitContainers[i]\n+\t\t\t\t\t\tbreak\n+\t\t\t\t\t}\n+\t\t\t\t}\n+\t\t\t}\n+\t\t\tgomega.Expect(containerSpec).ToNot(gomega.BeNil(), \"container spec for %s not found\", containerResource.Name)\n+\n+\t\t\tif expectedGuaranteedSet.Has(containerResource.Name) {\n+\t\t\t\tgomega.Expect(containerResource.Memory).ToNot(gomega.BeEmpty(), \"expected memory resources for container %s\", containerResource.Name)\n+\t\t\t\tfor _, mem := range containerResource.Memory {\n+\t\t\t\t\tq := containerSpec.Resources.Limits[v1.ResourceName(mem.MemoryType)]\n+\t\t\t\t\tval, ok := q.AsInt64()\n+\t\t\t\t\tgomega.Expect(ok).To(gomega.BeTrueBecause(\"cannot convert value to integer\"))\n+\t\t\t\t\tgomega.Expect(val).To(gomega.BeEquivalentTo(mem.Size))\n+\t\t\t\t}\n+\t\t\t} else {\n+\t\t\t\tif expectedSharedMemorySize > 0 {\n+\t\t\t\t\tgomega.Expect(containerResource.Memory).ToNot(gomega.BeEmpty(), \"expected memory resources for non-guaranteed container %s\", containerResource.Name)\n+\t\t\t\t\tvar totalAllocated uint64\n+\t\t\t\t\tfor _, mem := range containerResource.Memory {\n+\t\t\t\t\t\ttotalAllocated += mem.Size\n+\t\t\t\t\t}\n+\t\t\t\t\tgomega.Expect(totalAllocated).To(gomega.BeEquivalentTo(expectedSharedMemorySize), \"container %s memory should match shared pool size\", containerResource.Name)\n+\t\t\t\t} else {\n+\t\t\t\t\tgomega.Expect(containerResource.Memory).To(gomega.BeEmpty(), \"expected no memory resources for container %s\", containerResource.Name)\n+\t\t\t\t}\n+\t\t\t}",
+      "callouts": [
+        {
+          "line": 265,
+          "note": "uses podresources API",
+          "kind": "info"
+        },
+        {
+          "line": 287,
+          "note": "matches container specs by name",
+          "kind": "warn"
+        },
+        {
+          "line": 311,
+          "note": "shared memory pool is asserted",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "risk",
+      "title": "What Could Break",
+      "caption": "The review risk is mostly cross-manager consistency.",
+      "bullets": [
+        {
+          "text": "[risk] **feature gates** must move together",
+          "why": "PodLevelResourceManagers assumes PodLevelResources is enabled wherever pod.spec.resources appears."
+        },
+        {
+          "text": "[risk] CPU and Memory guards must match",
+          "why": "Divergent empty-pool handling would admit pods one manager cannot allocate."
+        },
+        {
+          "text": "[risk] checkpoint fallback hides corrupt V3 reads",
+          "why": "A bad V3 read can fall back to V2, losing pod assignments until rebuild."
+        },
+        {
+          "text": "[risk] tests are mostly node-shape dependent",
+          "why": "Insufficient NUMA or CPU topology can skip the exact cases reviewers care about."
+        }
+      ]
+    },
+    {
+      "kind": "skipped",
+      "title": "Not In The Deck",
+      "caption": "Skim these in GitHub after the core path lands.",
+      "groups": [
+        {
+          "label": "large test matrices",
+          "count": 16
+        },
+        {
+          "label": "checkpoint mirrors",
+          "count": 8
+        },
+        {
+          "label": "fake managers",
+          "count": 4
+        },
+        {
+          "label": "feature references",
+          "count": 4
+        },
+        {
+          "label": "small interface hooks",
+          "count": 7
+        },
+        {
+          "label": "routine managers",
+          "count": 10
+        }
+      ]
+    },
+    {
+      "kind": "outro",
+      "title": "Where To Start",
+      "bullets": [
+        "Start in ==scope_pod.go== to trace admission",
+        "[risk] review CPU and Memory empty-pool symmetry",
+        "[risk] inspect checkpoint migration before kubelet restart",
+        "[new] skim e2e skips for hardware assumptions"
+      ],
+      "mr_url": "https://github.com/kubernetes/kubernetes/pull/134768",
+      "files_changed": 55
+    }
+  ]
+}
+  </script>
+  <script src="vendor/roughjs/rough.umd.js"></script>
+  <script src="vendor/diff2html/diff2html-ui.min.js"></script>
+  <script src="deck.js"></script>
+</body>
+</html>

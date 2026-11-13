@@ -8,14 +8,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const samplePath = resolve(
   repoRoot,
-  '.claude/skills/tell-me-a-pr/assets/deck-template/sample.html',
+  '.claude/skills/once-upon-a-pr/assets/deck-template/sample.html',
 );
 const tmpDir = resolve(repoRoot, '.tmp/demo-record');
 const framesDir = join(tmpDir, 'frames');
 const outGif = resolve(repoRoot, 'docs/demo.gif');
 
 // Per-slide hold times (ms). Index 0 = slide 1, etc.
-const holds = [2600, 2800, 2800, 2800, 2800, 2400];
+const holds = [2600, 2400, 3200, 2800, 2400];
 
 const VIEWPORT = { width: 1280, height: 800 };
 const GIF_WIDTH = 960;

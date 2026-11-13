@@ -1,0 +1,268 @@
+{
+  "mr_id": "136987",
+  "mr_title": "[KEP-5825] cri-api: Add streaming RPCs for CRI list operations",
+  "mr_url": "https://github.com/kubernetes/kubernetes/pull/136987",
+  "generated_at": "2026-06-02T09:44:23.272Z",
+  "commit_sha": "fa4710ad0098310c7d57798078d9df84087960a7",
+  "thesis": "Streams large CRI list operations while falling back for old runtimes.",
+  "slides": [
+    {
+      "kind": "cover",
+      "title": "CRI List Streaming",
+      "subtitle": "Streams large CRI list responses without breaking old runtimes",
+      "bullets": [
+        "[new] six streamed list RPCs avoid gRPC message limits",
+        "[new] kubelet falls back when runtimes return ==Unimplemented==",
+        {
+          "text": "[risk] partial streams are discarded on timeout",
+          "why": "Slow runtimes can waste work; kubelet only processes completed streams."
+        },
+        "19 files, mostly generated protobuf and node tests"
+      ],
+      "meta": {
+        "author": "bitoku",
+        "branch": "kep-5825-cri",
+        "lines_added": 4140,
+        "lines_removed": 2292,
+        "files_changed": 19,
+        "shape": "integration",
+        "est_read_seconds": 215
+      }
+    },
+    {
+      "kind": "section",
+      "title": "The Contract",
+      "caption": "The feature is API-first, then kubelet opts in.",
+      "bullets": [
+        "[new] CRIListStreaming starts as alpha in 1.36",
+        "[new] streams return batches, not single items",
+        "[risk] runtimes control batch size and completion timing"
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Alpha Gate",
+      "caption": "Adds CRIListStreaming and keeps it default-off.",
+      "file": "pkg/features/kube_features.go",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/136987/files",
+      "diff": "diff --git a/pkg/features/kube_features.go b/pkg/features/kube_features.go\nindex 776a76f58b4c8..58dac60b0a9e5 100644\n--- a/pkg/features/kube_features.go\n+++ b/pkg/features/kube_features.go\n@@ -118,3 +118,9 @@\n \t// Allow the usage of options to fine-tune the cpumanager policies.\n \tCPUManagerPolicyOptions featuregate.Feature = \"CPUManagerPolicyOptions\"\n \n+\t// owner: @bitoku\n+\t// kep: https://kep.k8s.io/5825\n+\t//\n+\t// Enables using streaming RPCs for CRI list operations.\n+\tCRIListStreaming featuregate.Feature = \"CRIListStreaming\"\n+\n@@ -1221,3 +1227,5 @@\n \t\t{Version: version.MustParse(\"1.33\"), Default: true, PreRelease: featuregate.GA, LockToDefault: true}, // remove in 1.36\n \t},\n \n+\tCRIListStreaming: {\n+\t\t{Version: version.MustParse(\"1.36\"), Default: false, PreRelease: featuregate.Alpha},",
+      "callouts": [
+        {
+          "line": 125,
+          "side": "new",
+          "line_text": "CRIListStreaming featuregate.Feature = \"CRIListStreaming\"",
+          "note": "new alpha feature flag",
+          "kind": "info"
+        },
+        {
+          "line": 1231,
+          "side": "new",
+          "line_text": "{Version: version.MustParse(\"1.36\"), Default: false, PreRelease: featuregate.Alpha},",
+          "note": "default-off in 1.36",
+          "kind": "warn"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Streaming RPC Shape",
+      "caption": "Documents EOF, batching, timeout, and partial-result behavior.",
+      "file": "staging/src/k8s.io/cri-api/pkg/apis/runtime/v1/api.proto",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/136987/files",
+      "diff": "diff --git a/staging/src/k8s.io/cri-api/pkg/apis/runtime/v1/api.proto b/staging/src/k8s.io/cri-api/pkg/apis/runtime/v1/api.proto\nindex 59ebd9fa08996..700f3f12e8b94 100644\n--- a/staging/src/k8s.io/cri-api/pkg/apis/runtime/v1/api.proto\n+++ b/staging/src/k8s.io/cri-api/pkg/apis/runtime/v1/api.proto\n@@ -48,6 +48,19 @@\n     rpc PodSandboxStatus(PodSandboxStatusRequest) returns (PodSandboxStatusResponse) {}\n     // ListPodSandbox returns a list of PodSandboxes.\n     rpc ListPodSandbox(ListPodSandboxRequest) returns (ListPodSandboxResponse) {}\n+    // StreamPodSandboxes returns a stream of PodSandboxes.\n+    // This is an alternative to ListPodSandbox that streams results in lists\n+    // of at least one item, avoiding the gRPC message size limit for nodes with\n+    // many pods. The number of items per list may vary depending on the\n+    // container runtime. Each item must appear in exactly one response and must\n+    // not be duplicated across responses in the same stream. The server must\n+    // close the stream with EOF after all items have been sent. The kubelet\n+    // collects all items from the stream and processes them all at once after\n+    // the stream completes. The kubelet enforces a timeout on the entire stream\n+    // and will discard partial results if the stream is not completed in time.\n+    // Feature gate: CRIListStreaming\n+    // See https://kep.k8s.io/5825 for more details.\n+    rpc StreamPodSandboxes(StreamPodSandboxesRequest) returns (stream StreamPodSandboxesResponse) {}\n \n     // CreateContainer creates a new container in specified PodSandbox\n     rpc CreateContainer(CreateContainerRequest) returns (CreateContainerResponse) {}",
+      "callouts": [
+        {
+          "line": 53,
+          "side": "new",
+          "line_text": "// of at least one item, avoiding the gRPC message size limit for nodes with",
+          "note": "batches avoid size limits",
+          "kind": "info"
+        },
+        {
+          "line": 60,
+          "side": "new",
+          "line_text": "// and will discard partial results if the stream is not completed in time.",
+          "note": "timeout drops partial results",
+          "kind": "risk",
+          "why": "The client waits for EOF before processing accumulated items."
+        },
+        {
+          "line": 63,
+          "side": "new",
+          "line_text": "rpc StreamPodSandboxes(StreamPodSandboxesRequest) returns (stream StreamPodSandboxesResponse) {}",
+          "note": "pod list gets a stream",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "section",
+      "title": "The Client Path",
+      "caption": "Kubelet enables streaming, but every list keeps a unary escape hatch.",
+      "bullets": [
+        "[new] kubelet passes the feature-gate result once",
+        "[new] list calls branch through useStreaming",
+        "[risk] first Unimplemented disables streaming globally"
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Kubelet Wires The Switch",
+      "caption": "Runtime and image services share one feature-gate decision.",
+      "file": "pkg/kubelet/kubelet.go",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/136987/files",
+      "diff": "diff --git a/pkg/kubelet/kubelet.go b/pkg/kubelet/kubelet.go\nindex 24d3be228f22e..3e957bd9aba7d 100644\n--- a/pkg/kubelet/kubelet.go\n+++ b/pkg/kubelet/kubelet.go\n@@ -405,9 +405,10 @@\n \t\tremoteImageEndpoint = kubeCfg.ContainerRuntimeEndpoint\n \t}\n \tvar err error\n-\tif kubeDeps.RemoteRuntimeService, err = remote.NewRemoteRuntimeService(ctx, kubeCfg.ContainerRuntimeEndpoint, kubeCfg.RuntimeRequestTimeout.Duration, kubeDeps.TracerProvider); err != nil {\n+\tuseStreaming := utilfeature.DefaultFeatureGate.Enabled(features.CRIListStreaming)\n+\tif kubeDeps.RemoteRuntimeService, err = remote.NewRemoteRuntimeService(ctx, kubeCfg.ContainerRuntimeEndpoint, kubeCfg.RuntimeRequestTimeout.Duration, kubeDeps.TracerProvider, useStreaming); err != nil {\n \t\treturn err\n \t}\n-\tif kubeDeps.RemoteImageService, err = remote.NewRemoteImageService(ctx, remoteImageEndpoint, kubeCfg.RuntimeRequestTimeout.Duration, kubeDeps.TracerProvider); err != nil {\n+\tif kubeDeps.RemoteImageService, err = remote.NewRemoteImageService(ctx, remoteImageEndpoint, kubeCfg.RuntimeRequestTimeout.Duration, kubeDeps.TracerProvider, useStreaming); err != nil {\n \t\treturn err\n \t}",
+      "callouts": [
+        {
+          "line": 408,
+          "side": "new",
+          "line_text": "useStreaming := utilfeature.DefaultFeatureGate.Enabled(features.CRIListStreaming)",
+          "note": "single gate value",
+          "kind": "info"
+        },
+        {
+          "line": 409,
+          "side": "new",
+          "line_text": "if kubeDeps.RemoteRuntimeService, err = remote.NewRemoteRuntimeService(ctx, kubeCfg.ContainerRuntimeEndpoint, kubeCfg.RuntimeRequestTimeout.Duration, kubeDeps.TracerProvider, useStreaming); err != nil {",
+          "note": "runtime receives switch",
+          "kind": "warn"
+        },
+        {
+          "line": 412,
+          "side": "new",
+          "line_text": "if kubeDeps.RemoteImageService, err = remote.NewRemoteImageService(ctx, remoteImageEndpoint, kubeCfg.RuntimeRequestTimeout.Duration, kubeDeps.TracerProvider, useStreaming); err != nil {",
+          "note": "image service mirrors it",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Fallback Happens On Recv",
+      "caption": "Unimplemented disables streaming; other stream errors stay errors.",
+      "file": "staging/src/k8s.io/cri-client/pkg/remote_runtime.go",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/136987/files",
+      "diff": "diff --git a/staging/src/k8s.io/cri-client/pkg/remote_runtime.go b/staging/src/k8s.io/cri-client/pkg/remote_runtime.go\nindex c7d1690254851..8fe3698eacea9 100644\n--- a/staging/src/k8s.io/cri-client/pkg/remote_runtime.go\n+++ b/staging/src/k8s.io/cri-client/pkg/remote_runtime.go\n@@ -336,3 +351,37 @@\n \treturn resp.Items, nil\n }\n \n+func (r *remoteRuntimeService) streamPodSandboxesV1(ctx context.Context, filter *runtimeapi.PodSandboxFilter) ([]*runtimeapi.PodSandbox, error) {\n+\tlogger := klog.FromContext(ctx)\n+\tstream, err := r.runtimeClient.StreamPodSandboxes(ctx, &runtimeapi.StreamPodSandboxesRequest{\n+\t\tFilter: filter,\n+\t})\n+\tif err != nil {\n+\t\tlogger.Error(err, \"StreamPodSandboxes from runtime service failed\", \"filter\", filter)\n+\t\treturn nil, err\n+\t}\n+\n+\tvar items []*runtimeapi.PodSandbox\n+\tfor {\n+\t\tresp, err := stream.Recv()\n+\t\tif errors.Is(err, io.EOF) {\n+\t\t\tbreak\n+\t\t}\n+\t\tif err != nil {\n+\t\t\t// If the RPC is unimplemented, disable streaming and fall back to the unary RPC.\n+\t\t\t// The Unimplemented status is not returned when creating the stream,\n+\t\t\t// but when calling Recv() on the stream.\n+\t\t\tif status.Code(err) == codes.Unimplemented {\n+\t\t\t\tlogger.Info(\"StreamPodSandboxes not implemented, falling back to ListPodSandbox\", \"filter\", filter)\n+\t\t\t\tr.useStreaming = false\n+\t\t\t\treturn r.listPodSandboxV1(ctx, filter)\n+\t\t\t}\n+\t\t\tlogger.Error(err, \"StreamPodSandboxes recv failed\", \"filter\", filter, \"itemsReceived\", len(items))\n+\t\t\treturn nil, err\n+\t\t}\n+\t\titems = append(items, resp.PodSandboxes...)\n+\t}\n+\n+\tlogger.V(10).Info(\"[RemoteRuntimeService] StreamPodSandboxes Response\", \"filter\", filter, \"items\", items)\n+\n+\treturn items, nil",
+      "callouts": [
+        {
+          "line": 356,
+          "side": "new",
+          "line_text": "stream, err := r.runtimeClient.StreamPodSandboxes(ctx, &runtimeapi.StreamPodSandboxesRequest{",
+          "note": "opens streaming RPC",
+          "kind": "info"
+        },
+        {
+          "line": 374,
+          "side": "new",
+          "line_text": "if status.Code(err) == codes.Unimplemented {",
+          "note": "only this error falls back",
+          "kind": "warn"
+        },
+        {
+          "line": 376,
+          "side": "new",
+          "line_text": "r.useStreaming = false",
+          "note": "mutates client-wide mode",
+          "kind": "risk",
+          "why": "One unsupported stream turns off all later streaming attempts."
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Node Test Proves Routing",
+      "caption": "CRI proxy asserts streaming replaces unary listing under the gate.",
+      "file": "test/e2e_node/criproxy_test.go",
+      "file_url": "https://github.com/kubernetes/kubernetes/pull/136987/files",
+      "diff": "diff --git a/test/e2e_node/criproxy_test.go b/test/e2e_node/criproxy_test.go\nindex 8b6e756ad6825..965e8aeb9c420 100644\n--- a/test/e2e_node/criproxy_test.go\n+++ b/test/e2e_node/criproxy_test.go\n@@ -251,3 +254,35 @@\n \t\t\tgomega.Expect(imagePullDuration).To(gomega.BeNumerically(\">=\", delayTime), \"PullImages should take more than 10 seconds\")\n \t\t})\n \t})\n+\n+\t// CRI streaming API tests\n+\tframework.Context(\"CRI streaming list operations\", feature.CriProxy, framework.WithFeatureGate(features.CRIListStreaming), func() {\n+\t\tginkgo.BeforeEach(func() {\n+\t\t\tif err := resetCRIProxyInjector(e2eCriProxy); err != nil {\n+\t\t\t\tginkgo.Skip(\"Skip the test since the CRI Proxy is undefined.\")\n+\t\t\t}\n+\t\t\tginkgo.DeferCleanup(func() error {\n+\t\t\t\treturn resetCRIProxyInjector(e2eCriProxy)\n+\t\t\t})\n+\t\t})\n+\n+\t\tginkgo.It(\"should use streaming RPCs for listing pods and containers\", func(ctx context.Context) {\n+\t\t\t// Track which streaming APIs were called\n+\t\t\tapiCalled := make(map[string]bool)\n+\t\t\terr := addCRIProxyInjector(e2eCriProxy, func(apiName string) error {\n+\t\t\t\tapiCalled[apiName] = true\n+\t\t\t\treturn nil\n+\t\t\t})\n+\t\t\tframework.ExpectNoError(err)\n+\n+\t\t\t// Wait for kubelet to make list calls (which should use streaming when enabled)\n+\t\t\tgomega.Eventually(func(g gomega.Gomega) {\n+\t\t\t\tg.Expect(apiCalled[criproxy.StreamContainers]).To(gomega.BeTrueBecause(\"StreamContainers should be called\"))\n+\t\t\t\tg.Expect(apiCalled[criproxy.StreamPodSandboxes]).To(gomega.BeTrueBecause(\"StreamPodSandboxes should be called\"))\n+\t\t\t\tg.Expect(apiCalled[criproxy.ListContainers]).To(gomega.BeFalseBecause(\"ListContainers should not be called\"))\n+\t\t\t\tg.Expect(apiCalled[criproxy.ListPodSandbox]).To(gomega.BeFalseBecause(\"ListPodSandbox should not be called\"))\n+\t\t\t}).WithPolling(1 * time.Second).WithTimeout(1 * time.Minute).Should(gomega.Succeed())\n+\t\t})\n+\n+\t\tginkgo.It(\"should handle mid-stream errors\", func(ctx context.Context) {\n+\t\t\t// Create a pod so that StreamContainersSend is called at least twice",
+      "callouts": [
+        {
+          "line": 259,
+          "side": "new",
+          "line_text": "framework.Context(\"CRI streaming list operations\", feature.CriProxy, framework.WithFeatureGate(features.CRIListStreaming), func() {",
+          "note": "feature-gated e2e context",
+          "kind": "info"
+        },
+        {
+          "line": 280,
+          "side": "new",
+          "line_text": "g.Expect(apiCalled[criproxy.StreamContainers]).To(gomega.BeTrueBecause(\"StreamContainers should be called\"))",
+          "note": "stream call required",
+          "kind": "warn"
+        },
+        {
+          "line": 282,
+          "side": "new",
+          "line_text": "g.Expect(apiCalled[criproxy.ListContainers]).To(gomega.BeFalseBecause(\"ListContainers should not be called\"))",
+          "note": "unary path forbidden",
+          "kind": "risk",
+          "why": "The test would miss accidental double-calling without this negative assertion."
+        }
+      ]
+    },
+    {
+      "kind": "risk",
+      "title": "Reviewer Radar",
+      "caption": "Cross-file behaviors worth checking before approval",
+      "bullets": [
+        {
+          "text": "[risk] **useStreaming** mutates without synchronization",
+          "why": "Concurrent list calls can race, though the PR states the worst case is extra fallbacks.",
+          "file": "staging/src/k8s.io/cri-client/pkg/remote_runtime.go",
+          "file_url": "https://github.com/kubernetes/kubernetes/pull/136987/files"
+        },
+        {
+          "text": "[risk] partial streams are never processed",
+          "why": "Any timeout discards accumulated items; verify kubelet callers tolerate retry-shaped behavior.",
+          "file": "staging/src/k8s.io/cri-api/pkg/apis/runtime/v1/api.proto",
+          "file_url": "https://github.com/kubernetes/kubernetes/pull/136987/files"
+        },
+        {
+          "text": "[risk] generated stubs swamp review attention",
+          "why": "The API contract is in api.proto; skim generated pb files for regeneration consistency only.",
+          "file": "staging/src/k8s.io/cri-api/pkg/apis/runtime/v1/api.pb.go",
+          "file_url": "https://github.com/kubernetes/kubernetes/pull/136987/files"
+        }
+      ]
+    },
+    {
+      "kind": "skipped",
+      "title": "Not in the deck",
+      "caption": "Skim these in the platform UI",
+      "groups": [
+        {
+          "label": "generated protobuf and gRPC output",
+          "count": 2
+        },
+        {
+          "label": "signature-only constructor updates",
+          "count": 5
+        },
+        {
+          "label": "fake CRI forwarding shims",
+          "count": 1
+        },
+        {
+          "label": "feature-list reference data",
+          "count": 2
+        },
+        {
+          "label": "mirror tests with unchanged expectations",
+          "count": 4
+        }
+      ]
+    },
+    {
+      "kind": "outro",
+      "title": "Where To Start",
+      "bullets": [
+        "Start at ==api.proto== to verify streamed-list semantics",
+        "Then inspect `streamPodSandboxesV1` fallback behavior",
+        "[risk] review e2e timeout and mid-stream failure coverage",
+        "Treat generated protobuf as regeneration evidence"
+      ],
+      "mr_url": "https://github.com/kubernetes/kubernetes/pull/136987",
+      "files_changed": 19
+    }
+  ]
+}

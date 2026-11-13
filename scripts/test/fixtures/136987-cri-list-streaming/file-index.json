@@ -1,0 +1,26 @@
+[
+  {
+    "path": "staging/src/k8s.io/cri-client/pkg/remote_runtime.go",
+    "change_type": "modified",
+    "lines_added": 37,
+    "lines_removed": 0,
+    "must_consider": true,
+    "must_consider_reason": "public API change",
+    "boilerplate": false,
+    "boilerplate_reason": null,
+    "interesting_score": 0.9,
+    "interesting_reason": "fallback behavior mutates streaming mode"
+  },
+  {
+    "path": "test/e2e_node/criproxy_test.go",
+    "change_type": "modified",
+    "lines_added": 35,
+    "lines_removed": 0,
+    "must_consider": true,
+    "must_consider_reason": "feature gate",
+    "boilerplate": false,
+    "boilerplate_reason": null,
+    "interesting_score": 0.7,
+    "interesting_reason": "negative assertions prove routing"
+  }
+]

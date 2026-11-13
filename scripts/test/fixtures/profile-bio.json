@@ -1,0 +1,104 @@
+{
+  "metadata": {
+    "mr_id": "42",
+    "title": "Add a short bio to user profiles · example",
+    "slug": "sample",
+    "mr_url": "https://example.com/pull/42",
+    "files_changed": 4,
+    "lines_added": 20,
+    "lines_removed": 0
+  },
+  "slides": [
+    {
+      "kind": "cover",
+      "eyebrow": "A sample walkthrough",
+      "title": "A little more context on each profile",
+      "subtitle": "People can add a short bio. Leaving it blank keeps their profile just as it is today.",
+      "meta": {
+        "files_changed": 4,
+        "est_read_seconds": 90
+      },
+      "changes": [
+        {
+          "label": "DB migration",
+          "text": "Add an optional bio column."
+        },
+        {
+          "label": "Service",
+          "text": "Validate and save the bio."
+        },
+        {
+          "label": "Controller",
+          "text": "Reuse profile permissions."
+        },
+        {
+          "label": "Editor",
+          "text": "Expose the new bio field."
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Existing profiles keep working",
+      "caption": "The new field is optional. Existing rows need no backfill, and a bio can be added whenever someone is ready.",
+      "file": "db/migrations/add_profile_bio.sql",
+      "file_url": "https://example.com/pull/42/files",
+      "diff": "diff --git a/db/migrations/add_profile_bio.sql b/db/migrations/add_profile_bio.sql\n--- a/db/migrations/add_profile_bio.sql\n+++ b/db/migrations/add_profile_bio.sql\n@@ -0,0 +1,2 @@\n+ALTER TABLE users\n+  ADD COLUMN bio VARCHAR(280) NULL;\n",
+      "callouts": [
+        {
+          "line": 2,
+          "side": "new",
+          "line_text": "  ADD COLUMN bio VARCHAR(280) NULL;",
+          "note": "Allowing NULL makes the change compatible with existing profiles.",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "The limit belongs on the server too",
+      "caption": "The editor helps people stay within 280 characters. The API enforces that limit for every caller.",
+      "file": "src/users/users.service.ts",
+      "file_url": "https://example.com/pull/42/files",
+      "diff": "diff --git a/src/users/users.service.ts b/src/users/users.service.ts\n--- a/src/users/users.service.ts\n+++ b/src/users/users.service.ts\n@@ -22,3 +22,13 @@\n   async findById(id: string) {\n     return this.repo.findOneByOrFail({ id });\n   }\n+\n+  async updateBio(userId: string, bio: string) {\n+    if (bio.length > 280) {\n+      throw new BadRequestException(\"Bio is too long\");\n+    }\n+\n+    const user = await this.repo.findOneByOrFail({ id: userId });\n+    user.bio = bio.trim();\n+    return this.repo.save(user);\n+  }\n",
+      "callouts": [
+        {
+          "line": 27,
+          "side": "new",
+          "line_text": "    if (bio.length > 280) {",
+          "note": "Direct API requests cannot bypass the editor’s length limit.",
+          "kind": "info"
+        },
+        {
+          "line": 32,
+          "side": "new",
+          "line_text": "    user.bio = bio.trim();",
+          "note": "Trim surrounding whitespace before saving the bio.",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Keep the same permission boundary",
+      "caption": "Editing a bio uses the existing profile guard, so access stays limited to the owner and administrators.",
+      "file": "src/users/users.controller.ts",
+      "file_url": "https://example.com/pull/42/files",
+      "diff": "diff --git a/src/users/users.controller.ts b/src/users/users.controller.ts\n--- a/src/users/users.controller.ts\n+++ b/src/users/users.controller.ts\n@@ -40,1 +40,6 @@\n   // Profile routes\n+  @Patch(\":id/bio\")\n+  @UseGuards(SelfOrAdminGuard)\n+  updateBio(@Param(\"id\") id: string, @Body(\"bio\") bio: string) {\n+    return this.usersService.updateBio(id, bio);\n+  }\n",
+      "callouts": [
+        {
+          "line": 42,
+          "side": "new",
+          "line_text": "  @UseGuards(SelfOrAdminGuard)",
+          "note": "This route reuses the profile permission check.",
+          "why": "Review the guard’s behavior for requests that target someone else’s profile.",
+          "kind": "risk"
+        }
+      ]
+    },
+    {
+      "kind": "outro",
+      "mr_url": "https://example.com/pull/42"
+    }
+  ]
+}

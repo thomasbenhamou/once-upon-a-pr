@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>35632-flight-add-more-dos-mitigations-to-flight-reply</title>
+  <link rel="stylesheet" href="vendor/diff2html/diff2html.min.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="deck-header">
+    <span class="deck-title" id="deckTitle">Once Upon a PR</span>
+    <div class="deck-progress">
+      <span class="frac"><span id="slideIndex">1</span> / <span id="slideTotal">1</span></span>
+      <div class="bar" id="progressBar">
+        <svg class="bar-sketch" aria-hidden="true"></svg>
+        <div class="bar-fill" id="barFill"></div>
+      </div>
+    </div>
+  </header>
+
+  <main id="slides">
+<section class="slide active" data-kind="cover">
+<h1>Flight Reply DoS Hardening</h1>
+<p class="subtitle">Server Functions reject oversized replies before parsing spirals</p>
+<ul class="bullets">
+<li><span class="tag tag-fix">fix</span> caps <mark>nested reply expansion</mark> across Flight decoding</li>
+<li><span class="tag tag-fix">fix</span> dedupes repeated Server Function references</li>
+<li><span class="tag tag-risk">risk</span> <strong>limits</strong> must reach every server-dom entrypoint<span class="bullet-why">One missed wrapper keeps custom arraySizeLimit unreachable for that runtime.</span></li>
+<li><span class="tag tag-fix">fix</span> <code>__proto__</code> keys are omitted, not assigned</li>
+</ul>
+<div class="meta"><span class="shape shape-fix">fix</span><span><strong>by</strong> unstubbable</span><span><strong>branch</strong> flight-dos-mitigations</span><span><strong>+835</strong>/<strong>-263</strong></span><span><strong>18</strong> files</span><span class="read-time">~3m 55s read</span></div>
+</section>
+
+<section class="slide" data-kind="section">
+<h2>Threat Model</h2>
+<p class="caption">Untrusted replies can multiply work before user code runs.</p>
+<ul class="bullets">
+<li>untrusted FormData can multiply references and arrays</li>
+<li>limits attach to the shared Reply decoder</li>
+<li>client and server both drop <mark>__proto__</mark></li>
+<li>repeated wrappers pass the same option shape</li>
+</ul>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>Nested Arrays Spend Budget</h3>
+<a class="file-link" href="https://github.com/facebook/react/pull/35632/files#diff-80176ba145466a6b4b583b8c2a66d815d792b3b50adb8acb39e75afa856daea1" target="_blank" rel="noreferrer">packages/react-server/src/ReactFlightReplyServer.js</a>
+</div>
+<p class="caption">Counts forked arrays before recursive revive walks children.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/packages/react-server/src/ReactFlightReplyServer.js b/packages/react-server/src/ReactFlightReplyServer.js
+--- a/packages/react-server/src/ReactFlightReplyServer.js
++++ b/packages/react-server/src/ReactFlightReplyServer.js
+@@ -589,16 +591,42 @@ function reviveModel(
+         reference,
+       );
+     }
+-    if (Array.isArray(value)) {
++    if (isArray(value)) {
++      let childContext: NestedArrayContext;
++      if (arrayRoot === null) {
++        childContext = ({
++          count: 0,
++          fork: false,
++        }: NestedArrayContext);
++        response._rootArrayContexts.set(value, childContext);
++      } else {
++        childContext = arrayRoot;
++      }
++      if (value.length &gt; 1) {
++        childContext.fork = true;
++      }
++      bumpArrayCount(childContext, value.length + 1, response);
+       for (let i = 0; i &lt; value.length; i++) {
+         const childRef =
+           reference !== undefined ? reference + ':' + i : undefined;
+         // $FlowFixMe[cannot-write]
+-        value[i] = reviveModel(response, value, '' + i, value[i], childRef);
++        value[i] = reviveModel(
++          response,
++          value,
++          '' + i,
++          value[i],
++          childRef,
++          childContext,
++        );
+       }
+     } else {
+       for (const key in value) {
+         if (hasOwnProperty.call(value, key)) {
++          if (key === __PROTO__) {
++            // $FlowFixMe[cannot-write]
++            delete value[key];
++            continue;
++          }
+           const childRef =</script>
+<script type="application/json" class="slide-callouts">[{"line":601,"side":"new","line_text":"response._rootArrayContexts.set(value, childContext);","note":"tracks root array context","kind":"info"},{"line":605,"side":"new","line_text":"if (value.length &gt; 1) {","note":"fork marks multiplicative nesting","kind":"warn"},{"line":608,"side":"new","line_text":"bumpArrayCount(childContext, value.length + 1, response);","note":"budget charged before recursion","kind":"risk","why":"Without early counting, attacker-shaped nested arrays can force deep traversal first."},{"line":625,"side":"new","line_text":"if (key === __PROTO__) {","note":"drops prototype key","kind":"warn"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>The Budget Gate</h3>
+<a class="file-link" href="https://github.com/facebook/react/pull/35632/files#diff-80176ba145466a6b4b583b8c2a66d815d792b3b50adb8acb39e75afa856daea1" target="_blank" rel="noreferrer">packages/react-server/src/ReactFlightReplyServer.js</a>
+</div>
+<p class="caption">One helper enforces array and scalar growth caps.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/packages/react-server/src/ReactFlightReplyServer.js b/packages/react-server/src/ReactFlightReplyServer.js
+--- a/packages/react-server/src/ReactFlightReplyServer.js
++++ b/packages/react-server/src/ReactFlightReplyServer.js
+@@ -624,6 +653,27 @@ function reviveModel(
+   return value;
+ }
+ 
++type NestedArrayContext = {
++  // Keeps track of how many slots, bytes or characters are in nested arrays/strings/typed arrays.
++  count: number,
++  // A single child is itself not harmful. There needs to be at least one parent array with more
++  // than one child.
++  fork: boolean,
++};
++
++function bumpArrayCount(
++  arrayContext: NestedArrayContext,
++  slots: number,
++  response: Response,
++): void {
++  const newCount = (arrayContext.count += slots);
++  if (newCount &gt; response._arraySizeLimit &amp;&amp; arrayContext.fork) {
++    throw new Error(
++      'Maximum array nesting exceeded. Large nested arrays can be dangerous. Try adding intermediate objects.',
++    );
++  }
++}
++
+ type InitializationReference = {
+   handler: InitializationHandler,
+   parentObject: Object,
+@@ -1472,16 +1823,30 @@ function parseModelString(
+     }
+     // We assume that anything else is a reference ID.
+     const ref = value.slice(1);
+-    return getOutlinedModel(response, ref, obj, key, createModel);
++    return getOutlinedModel(response, ref, obj, key, arrayRoot, createModel);
++  }
++  if (arrayRoot !== null) {
++    bumpArrayCount(arrayRoot, value.length, response);
+   }
+   return value;
+ }
+ 
++const DEFAULT_MAX_ARRAY_NESTING = 1000000;
++
++// Limit BigInt size to prevent CPU exhaustion from parsing very large values.
++// 300 digits covers most practical use cases (even 512-bit integers need only
++// ~154 digits) and aligns with the implicit limit from the Number approximation
++// checks in fulfillReference and getOutlinedModel.
++const MAX_BIGINT_DIGITS = 300;
++
++export const MAX_BOUND_ARGS = 1000;
++
+ export function createResponse(
+   bundlerConfig: ServerManifest,
+   formFieldPrefix: string,
+   temporaryReferences: void | TemporaryReferenceSet,
+   backingFormData?: FormData = new FormData(),
++  arraySizeLimit?: number = DEFAULT_MAX_ARRAY_NESTING,
+ ): Response {
+   const chunks: Map&lt;number, SomeChunk&lt;any&gt;&gt; = new Map();</script>
+<script type="application/json" class="slide-callouts">[{"line":669,"side":"new","line_text":"const newCount = (arrayContext.count += slots);","note":"increments shared counter","kind":"info"},{"line":670,"side":"new","line_text":"if (newCount &gt; response._arraySizeLimit &amp;&amp; arrayContext.fork) {","note":"forked expansion trips limit","kind":"risk","why":"Single long lists still work; multiplicative nesting is what fails fast."},{"line":1834,"side":"new","line_text":"const DEFAULT_MAX_ARRAY_NESTING = 1000000;","note":"default ceiling is explicit","kind":"warn"},{"line":1842,"side":"new","line_text":"export const MAX_BOUND_ARGS = 1000;","note":"bound-arg ceiling is shared","kind":"info"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>Server References Share Promise</h3>
+<a class="file-link" href="https://github.com/facebook/react/pull/35632/files#diff-80176ba145466a6b4b583b8c2a66d815d792b3b50adb8acb39e75afa856daea1" target="_blank" rel="noreferrer">packages/react-server/src/ReactFlightReplyServer.js</a>
+</div>
+<p class="caption">Duplicate metadata waits on the first resolver.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/packages/react-server/src/ReactFlightReplyServer.js b/packages/react-server/src/ReactFlightReplyServer.js
+--- a/packages/react-server/src/ReactFlightReplyServer.js
++++ b/packages/react-server/src/ReactFlightReplyServer.js
+@@ -472,22 +415,73 @@ function loadServerReference&lt;A: Iterable&lt;any&gt;, T&gt;(
+     // as "thenable" which reduces to ReactPromise with no other fields.
+     return (null: any);
+   }
++
++  // Check for a cached promise from a previous call with the same metadata.
++  // This handles deduplication when the same server reference appears multiple
++  // times in the payload.
++  const cachedPromise: SomeChunk&lt;T&gt; | void = (metaData: any).$$promise;
++  if (cachedPromise !== undefined) {
++    if (cachedPromise.status === INITIALIZED) {
++      // The value was already resolved by a previous call.
++      const resolvedValue: T = cachedPromise.value;
++      if (key === __PROTO__) {
++        return (null: any);
++      }
++      parentObject[key] = resolvedValue;
++      return (resolvedValue: any);
++    }
++
++    // The promise is still blocked. Increment the handler dependency count ...
++    let handler: InitializationHandler;
++    if (initializingHandler) {
++      handler = initializingHandler;
++      handler.deps++;
++    } else {
++      handler = initializingHandler = {
++        chunk: null,
++        value: null,
++        reason: null,
++        deps: 1,
++        errored: false,
++      };
++    }
++    // ... and register resolve and reject listeners on the promise.
++    cachedPromise.then(
++      resolveReference.bind(null, response, handler, parentObject, key),
++      rejectReference.bind(null, response, handler),
++    );
++
++    // Return a place holder value for now.
++    return (null: any);
++  }
++
++  // This is the first call for this server reference metadata. Create a cached
++  // promise to be used for subsequent calls.
++  // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors
++  const blockedPromise: BlockedChunk&lt;T&gt; = new ReactPromise(BLOCKED, null, null);
++  (metaData: any).$$promise = blockedPromise;
++
+   const serverReference: ServerReference&lt;T&gt; =
+     resolveServerReference&lt;$FlowFixMe&gt;(response._bundlerConfig, id);
+   // We expect most servers to not really need this because you'd just have all
+   // the relevant modules already loaded but it allows for lazy loading of code
+   // if needed.
+   const bound = metaData.bound;
+-  let promise: null | Thenable&lt;any&gt; = preloadModule(serverReference);
+-  if (!promise) {</script>
+<script type="application/json" class="slide-callouts">[{"line":422,"side":"new","line_text":"const cachedPromise: SomeChunk&lt;T&gt; | void = (metaData: any).$$promise;","note":"metadata carries cache","kind":"warn"},{"line":449,"side":"new","line_text":"cachedPromise.then(","note":"later references subscribe","kind":"info"},{"line":461,"side":"new","line_text":"const blockedPromise: BlockedChunk&lt;T&gt; = new ReactPromise(BLOCKED, null, null);","note":"first reference owns work","kind":"info"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>Bound Args Have a Ceiling</h3>
+<a class="file-link" href="https://github.com/facebook/react/pull/35632/files#diff-75b05c2ae6fb96265e8c45ceb3ef73e0d5dd6df40f001d2a58561cff01d9bb4f" target="_blank" rel="noreferrer">packages/react-server/src/ReactFlightActionServer.js</a>
+</div>
+<p class="caption">Bound server functions reject huge argument lists.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/packages/react-server/src/ReactFlightActionServer.js b/packages/react-server/src/ReactFlightActionServer.js
+--- a/packages/react-server/src/ReactFlightActionServer.js
++++ b/packages/react-server/src/ReactFlightActionServer.js
+@@ -20,26 +20,48 @@ import {
+   requireModule,
+ } from 'react-client/src/ReactFlightClientConfig';
+ 
+-import {createResponse, close, getRoot} from './ReactFlightReplyServer';
++import {
++  createResponse,
++  close,
++  getRoot,
++  MAX_BOUND_ARGS,
++} from './ReactFlightReplyServer';
+ 
+ type ServerReferenceId = any;
+ 
+ function bindArgs(fn: any, args: any) {
++  if (args.length &gt; MAX_BOUND_ARGS) {
++    throw new Error(
++      'Server Function has too many bound arguments. Received ' +
++        args.length +
++        ' but the limit is ' +
++        MAX_BOUND_ARGS +
++        '.',
++    );
++  }
++
+   return fn.bind.apply(fn, [null].concat(args));
+ }
+ 
+ function loadServerReference&lt;T&gt;(
+   bundlerConfig: ServerManifest,
+-  id: ServerReferenceId,
+-  bound: null | Thenable&lt;Array&lt;any&gt;&gt;,
++  metaData: {
++    id: string,
++    bound: null | Promise&lt;Array&lt;any&gt;&gt;,
++  },
+ ): Promise&lt;T&gt; {
++  const id: ServerReferenceId = metaData.id;
++  if (typeof id !== 'string') {
++    return (null: any);
++  }
+   const serverReference: ServerReference&lt;T&gt; =
+     resolveServerReference&lt;$FlowFixMe&gt;(bundlerConfig, id);
+   // We expect most servers to not really need this because you'd just have all
+   // the relevant modules already loaded but it allows for lazy loading of code
+   // if needed.
+   const preloadPromise = preloadModule(serverReference);
+-  if (bound) {
++  const bound = metaData.bound;</script>
+<script type="application/json" class="slide-callouts">[{"line":27,"side":"new","line_text":"MAX_BOUND_ARGS,","note":"imports shared ceiling","kind":"info"},{"line":33,"side":"new","line_text":"if (args.length &gt; MAX_BOUND_ARGS) {","note":"throws before bind","kind":"risk","why":"Huge bound arrays no longer allocate into Function.bind first."},{"line":53,"side":"new","line_text":"const id: ServerReferenceId = metaData.id;","note":"metadata object is validated","kind":"warn"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>Duplicate Actions Load Once</h3>
+<a class="file-link" href="https://github.com/facebook/react/pull/35632/files#diff-75b05c2ae6fb96265e8c45ceb3ef73e0d5dd6df40f001d2a58561cff01d9bb4f" target="_blank" rel="noreferrer">packages/react-server/src/ReactFlightActionServer.js</a>
+</div>
+<p class="caption">Repeated action fields are ignored after first sighting.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/packages/react-server/src/ReactFlightActionServer.js b/packages/react-server/src/ReactFlightActionServer.js
+--- a/packages/react-server/src/ReactFlightActionServer.js
++++ b/packages/react-server/src/ReactFlightActionServer.js
+@@ -97,21 +122,36 @@ export function decodeAction&lt;T&gt;(
+       formData.append(key, value);
+       return;
+     }
+-    // Later actions may override earlier actions if a button is used to override the default
+-    // form action.
++    // Later actions may override earlier actions if a button is used to
++    // override the default form action. However, we don't expect the same
++    // action ref field to be sent multiple times in legitimate form data.
+     if (key.startsWith('$ACTION_REF_')) {
++      if (seenActions.has(key)) {
++        return;
++      }
++      seenActions.add(key);
+       const formFieldPrefix = '$ACTION_' + key.slice(12) + ':';
+       const metaData = decodeBoundActionMetaData(
+         body,
+         serverManifest,
+         formFieldPrefix,
+       );
+-      action = loadServerReference(serverManifest, metaData.id, metaData.bound);
++      action = loadServerReference(serverManifest, metaData);
+       return;
+     }
++    // A simple action with no bound arguments may appear twice in the form data
++    // if a button specifies the same action as the default form action. We only
++    // load the first one, as they're guaranteed to be identical.
+     if (key.startsWith('$ACTION_ID_')) {
++      if (seenActions.has(key)) {
++        return;
++      }
++      seenActions.add(key);
+       const id = key.slice(11);
+-      action = loadServerReference(serverManifest, id, null);
++      action = loadServerReference(serverManifest, {
++        id,
++        bound: null,</script>
+<script type="application/json" class="slide-callouts">[{"line":129,"side":"new","line_text":"if (seenActions.has(key)) {","note":"duplicates return early","kind":"warn"},{"line":132,"side":"new","line_text":"seenActions.add(key);","note":"first action wins","kind":"info"},{"line":139,"side":"new","line_text":"action = loadServerReference(serverManifest, metaData);","note":"metadata stays bundled","kind":"info"},{"line":151,"side":"new","line_text":"action = loadServerReference(serverManifest, {","note":"simple IDs use same path","kind":"warn"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>Client Refuses Prototype Writes</h3>
+<a class="file-link" href="https://github.com/facebook/react/pull/35632/files#diff-4bc3e2f66cfadc63bd7abcc0387fcc7c1373092f832cac1b34614d8cddca5eac" target="_blank" rel="noreferrer">packages/react-client/src/ReactFlightClient.js</a>
+</div>
+<p class="caption">Reference resolution validates paths before assigning values.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/packages/react-client/src/ReactFlightClient.js b/packages/react-client/src/ReactFlightClient.js
+--- a/packages/react-client/src/ReactFlightClient.js
++++ b/packages/react-client/src/ReactFlightClient.js
+@@ -1544,7 +1548,16 @@ function fulfillReference(
+           }
+         }
+       }
+-      value = value[path[i]];
++      const name = path[i];
++      if (
++        typeof value === 'object' &amp;&amp;
++        value !== null &amp;&amp;
++        hasOwnProperty.call(value, name)
++      ) {
++        value = value[name];
++      } else {
++        throw new Error('Invalid reference.');
++      }
+     }
+ 
+     while (
+@@ -1580,7 +1593,9 @@ function fulfillReference(
+     }
+ 
+     const mappedValue = map(response, value, parentObject, key);
+-    parentObject[key] = mappedValue;
++    if (key !== __PROTO__) {
++      parentObject[key] = mappedValue;
++    }
+ 
+     // If this is the root object for a model reference, where `handler.value`
+     // is a stale `null`, the resolved value can be used directly.
+@@ -5183,6 +5204,9 @@ function parseModel&lt;T&gt;(response: Response, json: UninitializedModel): T {
+ function createFromJSONCallback(response: Response) {
+   // $FlowFixMe[missing-this-annot]
+   return function (key: string, value: JSONValue) {
++    if (key === __PROTO__) {
++      return undefined;
++    }
+     if (typeof value === 'string') {
+       // We can't use .bind here because we need the "this" value.
+       return parseModelString(response, this, key, value);</script>
+<script type="application/json" class="slide-callouts">[{"line":1555,"side":"new","line_text":"hasOwnProperty.call(value, name)","note":"rejects inherited path hops","kind":"risk","why":"Prototype-chain lookups could resolve attacker-controlled references."},{"line":1596,"side":"new","line_text":"if (key !== __PROTO__) {","note":"assignment is skipped","kind":"warn"},{"line":5207,"side":"new","line_text":"if (key === __PROTO__) {","note":"JSON revive omits proto","kind":"info"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+<div class="code-head">
+<h3>Client Upload Dedupes Functions</h3>
+<a class="file-link" href="https://github.com/facebook/react/pull/35632/files#diff-19bac24d472b85edf6edecc59648f2a93077a9e7e09779e97d5627428aa8677a" target="_blank" rel="noreferrer">packages/react-client/src/ReactFlightReplyClient.js</a>
+</div>
+<p class="caption">Outgoing references reuse FormData IDs and warn on proto.</p>
+<div class="diff-frame">
+<svg class="frame-sketch" aria-hidden="true"></svg>
+<div class="diff-container"></div>
+</div>
+<script type="application/x-diff" class="slide-diff">diff --git a/packages/react-client/src/ReactFlightReplyClient.js b/packages/react-client/src/ReactFlightReplyClient.js
+--- a/packages/react-client/src/ReactFlightReplyClient.js
++++ b/packages/react-client/src/ReactFlightReplyClient.js
+@@ -361,6 +363,15 @@ export function processReply(
+   ): ReactJSONValue {
+     const parent = this;
+ 
++    if (__DEV__) {
++      if (key === __PROTO__) {
++        console.error(
++          'Expected not to serialize an object with own property `__proto__`. When parsed this property will be omitted.%s',
++          describeObjectForErrorMessage(parent, key),
++        );
++      }
++    }
++
+     // Make sure that `parent[key]` wasn't JSONified before `value` was passed to us
+     if (__DEV__) {
+       // $FlowFixMe[incompatible-use]
+@@ -780,6 +791,10 @@ export function processReply(
+     if (typeof value === 'function') {
+       const referenceClosure = knownServerReferences.get(value);
+       if (referenceClosure !== undefined) {
++        const existingReference = writtenObjects.get(value);
++        if (existingReference !== undefined) {
++          return existingReference;
++        }
+         const {id, bound} = referenceClosure;
+         const referenceClosureJSON = JSON.stringify({id, bound}, resolveToJSON);
+         if (formData === null) {
+@@ -789,7 +804,10 @@ export function processReply(
+         // The reference to this function came from the same client so we can pass it back.
+         const refId = nextPartId++;
+         formData.set(formFieldPrefix + refId, referenceClosureJSON);
+-        return serializeServerReferenceID(refId);
++        const serverReferenceId = serializeServerReferenceID(refId);
++        // Store the server reference ID for deduplication.
++        writtenObjects.set(value, serverReferenceId);
++        return serverReferenceId;
+       }
+       if (temporaryReferences !== undefined &amp;&amp; key.indexOf(':') === -1) {
+         // TODO: If the property name contains a colon, we don't dedupe. Escape instead.</script>
+<script type="application/json" class="slide-callouts">[{"line":367,"side":"new","line_text":"if (key === __PROTO__) {","note":"dev warning before omit","kind":"warn"},{"line":794,"side":"new","line_text":"const existingReference = writtenObjects.get(value);","note":"checks previous function ref","kind":"info"},{"line":809,"side":"new","line_text":"writtenObjects.set(value, serverReferenceId);","note":"stores reusable server ID","kind":"info"}]</script>
+</section>
+
+<section class="slide" data-kind="risk">
+<h2>Review Risks</h2>
+<p class="caption">Three risks span files, not one hunk.</p>
+<ul class="bullets">
+<li><span class="tag tag-risk">risk</span> server-dom wrappers repeat option plumbing<span class="bullet-why">A missed entrypoint would ignore caller-provided arraySizeLimit in that bundler/runtime pair.</span></li>
+<li><span class="tag tag-risk">risk</span> MAX defaults are policy, not tests<span class="bullet-why">Limits might block exotic valid payloads; check React&#x27;s downstream release notes.</span></li>
+<li><span class="tag tag-risk">risk</span> metadata mutation stores $$promise<span class="bullet-why">Non-plain metadata objects or frozen payloads could break dedupe assumptions.</span></li>
+</ul>
+</section>
+
+<section class="slide" data-kind="skipped">
+<h2>Not in the deck</h2>
+<p class="caption">Skim these in the platform UI</p>
+<ul class="skipped-groups">
+<li><span class="skipped-count">11</span> server-dom wrappers</li>
+<li><span class="skipped-count">1</span> render warning</li>
+<li><span class="skipped-count">1</span> markup config</li>
+<li><span class="skipped-count">1</span> error-code update</li>
+</ul>
+</section>
+
+<section class="slide" data-kind="outro">
+<h2>Where to Start</h2>
+<ul class="bullets">
+<li>start at <mark>ReactFlightReplyServer.js</mark> array counting</li>
+<li><span class="tag tag-risk">risk</span> inspect $$promise metadata mutation<span class="bullet-why">Dedupe depends on mutating parsed metadata; frozen or exotic values could reject unexpectedly.</span></li>
+<li>then skim 11 server-dom wrapper pass-throughs</li>
+<li>+835 / -263 across 18 files</li>
+</ul>
+<a class="mr-cta" href="https://github.com/facebook/react/pull/35632" target="_blank" rel="noreferrer">Open the MR →</a>
+<div class="deck-meta">18 files changed</div>
+</section>
+  </main>
+
+  <nav class="deck-nav" aria-label="Slide navigation">
+    <div class="kbd-hint" id="kbdHint">
+      <svg class="kbd-frame" aria-hidden="true"></svg>
+      <span class="kbd-caption">
+        <span class="kbd-glyph" aria-hidden="true">&#9000;</span>
+        <span class="kbd-keys">&#9664;&nbsp;&#9654;</span>
+        <span class="kbd-text">to navigate</span>
+      </span>
+    </div>
+    <div class="nav-buttons">
+      <button id="prevBtn" class="nav-btn" aria-label="Previous slide">
+        <svg class="nav-sketch" aria-hidden="true"></svg>
+        <span class="nav-arrow">&#9664;</span>
+      </button>
+      <button id="nextBtn" class="nav-btn" aria-label="Next slide">
+        <svg class="nav-sketch" aria-hidden="true"></svg>
+        <span class="nav-arrow">&#9654;</span>
+      </button>
+    </div>
+  </nav>
+
+  <script id="manifest" type="application/json">
+{
+  "mr_id": "35632",
+  "mr_title": "[Flight] Add more DoS mitigations to Flight Reply, and harden Flight",
+  "mr_url": "https://github.com/facebook/react/pull/35632",
+  "generated_at": "2026-06-02T09:16:37.643832+00:00",
+  "commit_sha": "d5324f41438fd58d01d5a5c2d6e4775872775b41",
+  "thesis": "Hardens Flight replies against oversized server-function payloads."
+}
+  </script>
+  <script src="vendor/roughjs/rough.umd.js"></script>
+  <script src="vendor/diff2html/diff2html-ui.min.js"></script>
+  <script src="deck.js"></script>
+</body>
+</html>

@@ -1,0 +1,343 @@
+{
+  "mr_id": "35632",
+  "mr_title": "[Flight] Add more DoS mitigations to Flight Reply, and harden Flight",
+  "mr_url": "https://github.com/facebook/react/pull/35632",
+  "generated_at": "2026-06-02T09:16:37.643832+00:00",
+  "commit_sha": "d5324f41438fd58d01d5a5c2d6e4775872775b41",
+  "thesis": "Hardens Flight replies against oversized server-function payloads.",
+  "slides": [
+    {
+      "kind": "cover",
+      "title": "Flight Reply DoS Hardening",
+      "subtitle": "Server Functions reject oversized replies before parsing spirals",
+      "bullets": [
+        "[fix] caps ==nested reply expansion== across Flight decoding",
+        "[fix] dedupes repeated Server Function references",
+        {
+          "text": "[risk] **limits** must reach every server-dom entrypoint",
+          "why": "One missed wrapper keeps custom arraySizeLimit unreachable for that runtime."
+        },
+        "[fix] `__proto__` keys are omitted, not assigned"
+      ],
+      "meta": {
+        "author": "unstubbable",
+        "branch": "flight-dos-mitigations",
+        "lines_added": 835,
+        "lines_removed": 263,
+        "files_changed": 18,
+        "shape": "fix",
+        "est_read_seconds": 235
+      }
+    },
+    {
+      "kind": "section",
+      "title": "Threat Model",
+      "caption": "Untrusted replies can multiply work before user code runs.",
+      "bullets": [
+        "untrusted FormData can multiply references and arrays",
+        "limits attach to the shared Reply decoder",
+        "client and server both drop ==__proto__==",
+        "repeated wrappers pass the same option shape"
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Nested Arrays Spend Budget",
+      "caption": "Counts forked arrays before recursive revive walks children.",
+      "file": "packages/react-server/src/ReactFlightReplyServer.js",
+      "file_url": "https://github.com/facebook/react/pull/35632/files#diff-80176ba145466a6b4b583b8c2a66d815d792b3b50adb8acb39e75afa856daea1",
+      "diff": "diff --git a/packages/react-server/src/ReactFlightReplyServer.js b/packages/react-server/src/ReactFlightReplyServer.js\n--- a/packages/react-server/src/ReactFlightReplyServer.js\n+++ b/packages/react-server/src/ReactFlightReplyServer.js\n@@ -589,16 +591,42 @@ function reviveModel(\n         reference,\n       );\n     }\n-    if (Array.isArray(value)) {\n+    if (isArray(value)) {\n+      let childContext: NestedArrayContext;\n+      if (arrayRoot === null) {\n+        childContext = ({\n+          count: 0,\n+          fork: false,\n+        }: NestedArrayContext);\n+        response._rootArrayContexts.set(value, childContext);\n+      } else {\n+        childContext = arrayRoot;\n+      }\n+      if (value.length > 1) {\n+        childContext.fork = true;\n+      }\n+      bumpArrayCount(childContext, value.length + 1, response);\n       for (let i = 0; i < value.length; i++) {\n         const childRef =\n           reference !== undefined ? reference + ':' + i : undefined;\n         // $FlowFixMe[cannot-write]\n-        value[i] = reviveModel(response, value, '' + i, value[i], childRef);\n+        value[i] = reviveModel(\n+          response,\n+          value,\n+          '' + i,\n+          value[i],\n+          childRef,\n+          childContext,\n+        );\n       }\n     } else {\n       for (const key in value) {\n         if (hasOwnProperty.call(value, key)) {\n+          if (key === __PROTO__) {\n+            // $FlowFixMe[cannot-write]\n+            delete value[key];\n+            continue;\n+          }\n           const childRef =",
+      "callouts": [
+        {
+          "line": 601,
+          "side": "new",
+          "line_text": "response._rootArrayContexts.set(value, childContext);",
+          "note": "tracks root array context",
+          "kind": "info"
+        },
+        {
+          "line": 605,
+          "side": "new",
+          "line_text": "if (value.length > 1) {",
+          "note": "fork marks multiplicative nesting",
+          "kind": "warn"
+        },
+        {
+          "line": 608,
+          "side": "new",
+          "line_text": "bumpArrayCount(childContext, value.length + 1, response);",
+          "note": "budget charged before recursion",
+          "kind": "risk",
+          "why": "Without early counting, attacker-shaped nested arrays can force deep traversal first."
+        },
+        {
+          "line": 625,
+          "side": "new",
+          "line_text": "if (key === __PROTO__) {",
+          "note": "drops prototype key",
+          "kind": "warn"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "The Budget Gate",
+      "caption": "One helper enforces array and scalar growth caps.",
+      "file": "packages/react-server/src/ReactFlightReplyServer.js",
+      "file_url": "https://github.com/facebook/react/pull/35632/files#diff-80176ba145466a6b4b583b8c2a66d815d792b3b50adb8acb39e75afa856daea1",
+      "diff": "diff --git a/packages/react-server/src/ReactFlightReplyServer.js b/packages/react-server/src/ReactFlightReplyServer.js\n--- a/packages/react-server/src/ReactFlightReplyServer.js\n+++ b/packages/react-server/src/ReactFlightReplyServer.js\n@@ -624,6 +653,27 @@ function reviveModel(\n   return value;\n }\n \n+type NestedArrayContext = {\n+  // Keeps track of how many slots, bytes or characters are in nested arrays/strings/typed arrays.\n+  count: number,\n+  // A single child is itself not harmful. There needs to be at least one parent array with more\n+  // than one child.\n+  fork: boolean,\n+};\n+\n+function bumpArrayCount(\n+  arrayContext: NestedArrayContext,\n+  slots: number,\n+  response: Response,\n+): void {\n+  const newCount = (arrayContext.count += slots);\n+  if (newCount > response._arraySizeLimit && arrayContext.fork) {\n+    throw new Error(\n+      'Maximum array nesting exceeded. Large nested arrays can be dangerous. Try adding intermediate objects.',\n+    );\n+  }\n+}\n+\n type InitializationReference = {\n   handler: InitializationHandler,\n   parentObject: Object,\n@@ -1472,16 +1823,30 @@ function parseModelString(\n     }\n     // We assume that anything else is a reference ID.\n     const ref = value.slice(1);\n-    return getOutlinedModel(response, ref, obj, key, createModel);\n+    return getOutlinedModel(response, ref, obj, key, arrayRoot, createModel);\n+  }\n+  if (arrayRoot !== null) {\n+    bumpArrayCount(arrayRoot, value.length, response);\n   }\n   return value;\n }\n \n+const DEFAULT_MAX_ARRAY_NESTING = 1000000;\n+\n+// Limit BigInt size to prevent CPU exhaustion from parsing very large values.\n+// 300 digits covers most practical use cases (even 512-bit integers need only\n+// ~154 digits) and aligns with the implicit limit from the Number approximation\n+// checks in fulfillReference and getOutlinedModel.\n+const MAX_BIGINT_DIGITS = 300;\n+\n+export const MAX_BOUND_ARGS = 1000;\n+\n export function createResponse(\n   bundlerConfig: ServerManifest,\n   formFieldPrefix: string,\n   temporaryReferences: void | TemporaryReferenceSet,\n   backingFormData?: FormData = new FormData(),\n+  arraySizeLimit?: number = DEFAULT_MAX_ARRAY_NESTING,\n ): Response {\n   const chunks: Map<number, SomeChunk<any>> = new Map();",
+      "callouts": [
+        {
+          "line": 669,
+          "side": "new",
+          "line_text": "const newCount = (arrayContext.count += slots);",
+          "note": "increments shared counter",
+          "kind": "info"
+        },
+        {
+          "line": 670,
+          "side": "new",
+          "line_text": "if (newCount > response._arraySizeLimit && arrayContext.fork) {",
+          "note": "forked expansion trips limit",
+          "kind": "risk",
+          "why": "Single long lists still work; multiplicative nesting is what fails fast."
+        },
+        {
+          "line": 1834,
+          "side": "new",
+          "line_text": "const DEFAULT_MAX_ARRAY_NESTING = 1000000;",
+          "note": "default ceiling is explicit",
+          "kind": "warn"
+        },
+        {
+          "line": 1842,
+          "side": "new",
+          "line_text": "export const MAX_BOUND_ARGS = 1000;",
+          "note": "bound-arg ceiling is shared",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Server References Share Promise",
+      "caption": "Duplicate metadata waits on the first resolver.",
+      "file": "packages/react-server/src/ReactFlightReplyServer.js",
+      "file_url": "https://github.com/facebook/react/pull/35632/files#diff-80176ba145466a6b4b583b8c2a66d815d792b3b50adb8acb39e75afa856daea1",
+      "diff": "diff --git a/packages/react-server/src/ReactFlightReplyServer.js b/packages/react-server/src/ReactFlightReplyServer.js\n--- a/packages/react-server/src/ReactFlightReplyServer.js\n+++ b/packages/react-server/src/ReactFlightReplyServer.js\n@@ -472,22 +415,73 @@ function loadServerReference<A: Iterable<any>, T>(\n     // as \"thenable\" which reduces to ReactPromise with no other fields.\n     return (null: any);\n   }\n+\n+  // Check for a cached promise from a previous call with the same metadata.\n+  // This handles deduplication when the same server reference appears multiple\n+  // times in the payload.\n+  const cachedPromise: SomeChunk<T> | void = (metaData: any).$$promise;\n+  if (cachedPromise !== undefined) {\n+    if (cachedPromise.status === INITIALIZED) {\n+      // The value was already resolved by a previous call.\n+      const resolvedValue: T = cachedPromise.value;\n+      if (key === __PROTO__) {\n+        return (null: any);\n+      }\n+      parentObject[key] = resolvedValue;\n+      return (resolvedValue: any);\n+    }\n+\n+    // The promise is still blocked. Increment the handler dependency count ...\n+    let handler: InitializationHandler;\n+    if (initializingHandler) {\n+      handler = initializingHandler;\n+      handler.deps++;\n+    } else {\n+      handler = initializingHandler = {\n+        chunk: null,\n+        value: null,\n+        reason: null,\n+        deps: 1,\n+        errored: false,\n+      };\n+    }\n+    // ... and register resolve and reject listeners on the promise.\n+    cachedPromise.then(\n+      resolveReference.bind(null, response, handler, parentObject, key),\n+      rejectReference.bind(null, response, handler),\n+    );\n+\n+    // Return a place holder value for now.\n+    return (null: any);\n+  }\n+\n+  // This is the first call for this server reference metadata. Create a cached\n+  // promise to be used for subsequent calls.\n+  // $FlowFixMe[invalid-constructor] Flow doesn't support functions as constructors\n+  const blockedPromise: BlockedChunk<T> = new ReactPromise(BLOCKED, null, null);\n+  (metaData: any).$$promise = blockedPromise;\n+\n   const serverReference: ServerReference<T> =\n     resolveServerReference<$FlowFixMe>(response._bundlerConfig, id);\n   // We expect most servers to not really need this because you'd just have all\n   // the relevant modules already loaded but it allows for lazy loading of code\n   // if needed.\n   const bound = metaData.bound;\n-  let promise: null | Thenable<any> = preloadModule(serverReference);\n-  if (!promise) {",
+      "callouts": [
+        {
+          "line": 422,
+          "side": "new",
+          "line_text": "const cachedPromise: SomeChunk<T> | void = (metaData: any).$$promise;",
+          "note": "metadata carries cache",
+          "kind": "warn"
+        },
+        {
+          "line": 449,
+          "side": "new",
+          "line_text": "cachedPromise.then(",
+          "note": "later references subscribe",
+          "kind": "info"
+        },
+        {
+          "line": 461,
+          "side": "new",
+          "line_text": "const blockedPromise: BlockedChunk<T> = new ReactPromise(BLOCKED, null, null);",
+          "note": "first reference owns work",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Bound Args Have a Ceiling",
+      "caption": "Bound server functions reject huge argument lists.",
+      "file": "packages/react-server/src/ReactFlightActionServer.js",
+      "file_url": "https://github.com/facebook/react/pull/35632/files#diff-75b05c2ae6fb96265e8c45ceb3ef73e0d5dd6df40f001d2a58561cff01d9bb4f",
+      "diff": "diff --git a/packages/react-server/src/ReactFlightActionServer.js b/packages/react-server/src/ReactFlightActionServer.js\n--- a/packages/react-server/src/ReactFlightActionServer.js\n+++ b/packages/react-server/src/ReactFlightActionServer.js\n@@ -20,26 +20,48 @@ import {\n   requireModule,\n } from 'react-client/src/ReactFlightClientConfig';\n \n-import {createResponse, close, getRoot} from './ReactFlightReplyServer';\n+import {\n+  createResponse,\n+  close,\n+  getRoot,\n+  MAX_BOUND_ARGS,\n+} from './ReactFlightReplyServer';\n \n type ServerReferenceId = any;\n \n function bindArgs(fn: any, args: any) {\n+  if (args.length > MAX_BOUND_ARGS) {\n+    throw new Error(\n+      'Server Function has too many bound arguments. Received ' +\n+        args.length +\n+        ' but the limit is ' +\n+        MAX_BOUND_ARGS +\n+        '.',\n+    );\n+  }\n+\n   return fn.bind.apply(fn, [null].concat(args));\n }\n \n function loadServerReference<T>(\n   bundlerConfig: ServerManifest,\n-  id: ServerReferenceId,\n-  bound: null | Thenable<Array<any>>,\n+  metaData: {\n+    id: string,\n+    bound: null | Promise<Array<any>>,\n+  },\n ): Promise<T> {\n+  const id: ServerReferenceId = metaData.id;\n+  if (typeof id !== 'string') {\n+    return (null: any);\n+  }\n   const serverReference: ServerReference<T> =\n     resolveServerReference<$FlowFixMe>(bundlerConfig, id);\n   // We expect most servers to not really need this because you'd just have all\n   // the relevant modules already loaded but it allows for lazy loading of code\n   // if needed.\n   const preloadPromise = preloadModule(serverReference);\n-  if (bound) {\n+  const bound = metaData.bound;",
+      "callouts": [
+        {
+          "line": 27,
+          "side": "new",
+          "line_text": "MAX_BOUND_ARGS,",
+          "note": "imports shared ceiling",
+          "kind": "info"
+        },
+        {
+          "line": 33,
+          "side": "new",
+          "line_text": "if (args.length > MAX_BOUND_ARGS) {",
+          "note": "throws before bind",
+          "kind": "risk",
+          "why": "Huge bound arrays no longer allocate into Function.bind first."
+        },
+        {
+          "line": 53,
+          "side": "new",
+          "line_text": "const id: ServerReferenceId = metaData.id;",
+          "note": "metadata object is validated",
+          "kind": "warn"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Duplicate Actions Load Once",
+      "caption": "Repeated action fields are ignored after first sighting.",
+      "file": "packages/react-server/src/ReactFlightActionServer.js",
+      "file_url": "https://github.com/facebook/react/pull/35632/files#diff-75b05c2ae6fb96265e8c45ceb3ef73e0d5dd6df40f001d2a58561cff01d9bb4f",
+      "diff": "diff --git a/packages/react-server/src/ReactFlightActionServer.js b/packages/react-server/src/ReactFlightActionServer.js\n--- a/packages/react-server/src/ReactFlightActionServer.js\n+++ b/packages/react-server/src/ReactFlightActionServer.js\n@@ -97,21 +122,36 @@ export function decodeAction<T>(\n       formData.append(key, value);\n       return;\n     }\n-    // Later actions may override earlier actions if a button is used to override the default\n-    // form action.\n+    // Later actions may override earlier actions if a button is used to\n+    // override the default form action. However, we don't expect the same\n+    // action ref field to be sent multiple times in legitimate form data.\n     if (key.startsWith('$ACTION_REF_')) {\n+      if (seenActions.has(key)) {\n+        return;\n+      }\n+      seenActions.add(key);\n       const formFieldPrefix = '$ACTION_' + key.slice(12) + ':';\n       const metaData = decodeBoundActionMetaData(\n         body,\n         serverManifest,\n         formFieldPrefix,\n       );\n-      action = loadServerReference(serverManifest, metaData.id, metaData.bound);\n+      action = loadServerReference(serverManifest, metaData);\n       return;\n     }\n+    // A simple action with no bound arguments may appear twice in the form data\n+    // if a button specifies the same action as the default form action. We only\n+    // load the first one, as they're guaranteed to be identical.\n     if (key.startsWith('$ACTION_ID_')) {\n+      if (seenActions.has(key)) {\n+        return;\n+      }\n+      seenActions.add(key);\n       const id = key.slice(11);\n-      action = loadServerReference(serverManifest, id, null);\n+      action = loadServerReference(serverManifest, {\n+        id,\n+        bound: null,",
+      "callouts": [
+        {
+          "line": 129,
+          "side": "new",
+          "line_text": "if (seenActions.has(key)) {",
+          "note": "duplicates return early",
+          "kind": "warn"
+        },
+        {
+          "line": 132,
+          "side": "new",
+          "line_text": "seenActions.add(key);",
+          "note": "first action wins",
+          "kind": "info"
+        },
+        {
+          "line": 139,
+          "side": "new",
+          "line_text": "action = loadServerReference(serverManifest, metaData);",
+          "note": "metadata stays bundled",
+          "kind": "info"
+        },
+        {
+          "line": 151,
+          "side": "new",
+          "line_text": "action = loadServerReference(serverManifest, {",
+          "note": "simple IDs use same path",
+          "kind": "warn"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Client Refuses Prototype Writes",
+      "caption": "Reference resolution validates paths before assigning values.",
+      "file": "packages/react-client/src/ReactFlightClient.js",
+      "file_url": "https://github.com/facebook/react/pull/35632/files#diff-4bc3e2f66cfadc63bd7abcc0387fcc7c1373092f832cac1b34614d8cddca5eac",
+      "diff": "diff --git a/packages/react-client/src/ReactFlightClient.js b/packages/react-client/src/ReactFlightClient.js\n--- a/packages/react-client/src/ReactFlightClient.js\n+++ b/packages/react-client/src/ReactFlightClient.js\n@@ -1544,7 +1548,16 @@ function fulfillReference(\n           }\n         }\n       }\n-      value = value[path[i]];\n+      const name = path[i];\n+      if (\n+        typeof value === 'object' &&\n+        value !== null &&\n+        hasOwnProperty.call(value, name)\n+      ) {\n+        value = value[name];\n+      } else {\n+        throw new Error('Invalid reference.');\n+      }\n     }\n \n     while (\n@@ -1580,7 +1593,9 @@ function fulfillReference(\n     }\n \n     const mappedValue = map(response, value, parentObject, key);\n-    parentObject[key] = mappedValue;\n+    if (key !== __PROTO__) {\n+      parentObject[key] = mappedValue;\n+    }\n \n     // If this is the root object for a model reference, where `handler.value`\n     // is a stale `null`, the resolved value can be used directly.\n@@ -5183,6 +5204,9 @@ function parseModel<T>(response: Response, json: UninitializedModel): T {\n function createFromJSONCallback(response: Response) {\n   // $FlowFixMe[missing-this-annot]\n   return function (key: string, value: JSONValue) {\n+    if (key === __PROTO__) {\n+      return undefined;\n+    }\n     if (typeof value === 'string') {\n       // We can't use .bind here because we need the \"this\" value.\n       return parseModelString(response, this, key, value);",
+      "callouts": [
+        {
+          "line": 1555,
+          "side": "new",
+          "line_text": "hasOwnProperty.call(value, name)",
+          "note": "rejects inherited path hops",
+          "kind": "risk",
+          "why": "Prototype-chain lookups could resolve attacker-controlled references."
+        },
+        {
+          "line": 1596,
+          "side": "new",
+          "line_text": "if (key !== __PROTO__) {",
+          "note": "assignment is skipped",
+          "kind": "warn"
+        },
+        {
+          "line": 5207,
+          "side": "new",
+          "line_text": "if (key === __PROTO__) {",
+          "note": "JSON revive omits proto",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Client Upload Dedupes Functions",
+      "caption": "Outgoing references reuse FormData IDs and warn on proto.",
+      "file": "packages/react-client/src/ReactFlightReplyClient.js",
+      "file_url": "https://github.com/facebook/react/pull/35632/files#diff-19bac24d472b85edf6edecc59648f2a93077a9e7e09779e97d5627428aa8677a",
+      "diff": "diff --git a/packages/react-client/src/ReactFlightReplyClient.js b/packages/react-client/src/ReactFlightReplyClient.js\n--- a/packages/react-client/src/ReactFlightReplyClient.js\n+++ b/packages/react-client/src/ReactFlightReplyClient.js\n@@ -361,6 +363,15 @@ export function processReply(\n   ): ReactJSONValue {\n     const parent = this;\n \n+    if (__DEV__) {\n+      if (key === __PROTO__) {\n+        console.error(\n+          'Expected not to serialize an object with own property `__proto__`. When parsed this property will be omitted.%s',\n+          describeObjectForErrorMessage(parent, key),\n+        );\n+      }\n+    }\n+\n     // Make sure that `parent[key]` wasn't JSONified before `value` was passed to us\n     if (__DEV__) {\n       // $FlowFixMe[incompatible-use]\n@@ -780,6 +791,10 @@ export function processReply(\n     if (typeof value === 'function') {\n       const referenceClosure = knownServerReferences.get(value);\n       if (referenceClosure !== undefined) {\n+        const existingReference = writtenObjects.get(value);\n+        if (existingReference !== undefined) {\n+          return existingReference;\n+        }\n         const {id, bound} = referenceClosure;\n         const referenceClosureJSON = JSON.stringify({id, bound}, resolveToJSON);\n         if (formData === null) {\n@@ -789,7 +804,10 @@ export function processReply(\n         // The reference to this function came from the same client so we can pass it back.\n         const refId = nextPartId++;\n         formData.set(formFieldPrefix + refId, referenceClosureJSON);\n-        return serializeServerReferenceID(refId);\n+        const serverReferenceId = serializeServerReferenceID(refId);\n+        // Store the server reference ID for deduplication.\n+        writtenObjects.set(value, serverReferenceId);\n+        return serverReferenceId;\n       }\n       if (temporaryReferences !== undefined && key.indexOf(':') === -1) {\n         // TODO: If the property name contains a colon, we don't dedupe. Escape instead.",
+      "callouts": [
+        {
+          "line": 367,
+          "side": "new",
+          "line_text": "if (key === __PROTO__) {",
+          "note": "dev warning before omit",
+          "kind": "warn"
+        },
+        {
+          "line": 794,
+          "side": "new",
+          "line_text": "const existingReference = writtenObjects.get(value);",
+          "note": "checks previous function ref",
+          "kind": "info"
+        },
+        {
+          "line": 809,
+          "side": "new",
+          "line_text": "writtenObjects.set(value, serverReferenceId);",
+          "note": "stores reusable server ID",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "risk",
+      "title": "Review Risks",
+      "caption": "Three risks span files, not one hunk.",
+      "bullets": [
+        {
+          "text": "[risk] server-dom wrappers repeat option plumbing",
+          "why": "A missed entrypoint would ignore caller-provided arraySizeLimit in that bundler/runtime pair."
+        },
+        {
+          "text": "[risk] MAX defaults are policy, not tests",
+          "why": "Limits might block exotic valid payloads; check React's downstream release notes."
+        },
+        {
+          "text": "[risk] metadata mutation stores $$promise",
+          "why": "Non-plain metadata objects or frozen payloads could break dedupe assumptions."
+        }
+      ]
+    },
+    {
+      "kind": "skipped",
+      "title": "Not in the deck",
+      "caption": "Skim these in the platform UI",
+      "groups": [
+        {
+          "label": "server-dom wrappers",
+          "count": 11
+        },
+        {
+          "label": "render warning",
+          "count": 1
+        },
+        {
+          "label": "markup config",
+          "count": 1
+        },
+        {
+          "label": "error-code update",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "kind": "outro",
+      "title": "Where to Start",
+      "bullets": [
+        "start at ==ReactFlightReplyServer.js== array counting",
+        {
+          "text": "[risk] inspect $$promise metadata mutation",
+          "why": "Dedupe depends on mutating parsed metadata; frozen or exotic values could reject unexpectedly."
+        },
+        "then skim 11 server-dom wrapper pass-throughs",
+        "+835 / -263 across 18 files"
+      ],
+      "mr_url": "https://github.com/facebook/react/pull/35632",
+      "files_changed": 18
+    }
+  ]
+}

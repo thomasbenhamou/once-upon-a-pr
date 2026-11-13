@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Add a short bio to user profiles · example</title>
+  <link rel="stylesheet" href="vendor/diff2html/diff2html.min.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="deck-header">
+    <div class="deck-identity">
+      <span class="deck-brand"><span class="brand-fairy" aria-hidden="true">🧚</span> Once Upon a PR</span>
+      <span class="deck-title" id="deckTitle">A walkthrough of the change</span>
+    </div>
+    <div class="deck-progress">
+      <span class="frac" aria-live="polite" aria-atomic="true"><span id="slideIndex">1</span><span class="frac-divider">/</span><span id="slideTotal">1</span></span>
+      <div class="bar" id="progressBar" role="progressbar" aria-label="Slide progress" aria-valuemin="1" aria-valuemax="1" aria-valuenow="1">
+        <div class="bar-fill" id="barFill"></div>
+      </div>
+    </div>
+  </header>
+
+  <main id="slides">
+    <section class="slide active" data-kind="cover">
+  <p class="eyebrow">A sample walkthrough</p>
+  <h1>A little more context on each profile</h1>
+  <p class="subtitle">People can add a short bio. Leaving it blank keeps their profile just as it is today.</p>
+  <div class="change-overview">
+    <p class="overview-label">What changes</p>
+    <dl class="change-areas">
+      <div><dt>DB migration</dt><dd>Add an optional bio column.</dd></div>
+      <div><dt>Service</dt><dd>Validate and save the bio.</dd></div>
+      <div><dt>Controller</dt><dd>Reuse profile permissions.</dd></div>
+      <div><dt>Editor</dt><dd>Expose the new bio field.</dd></div>
+    </dl>
+  </div>
+
+  <div class="meta">
+  <span><strong>4</strong>files</span>
+  <span class="read-time">~1m 30s read</span>
+</div>
+</section>
+
+<section class="slide" data-kind="code">
+  <p class="eyebrow">A closer look</p>
+  <div class="code-head"><h2>Existing profiles keep working</h2></div>
+  <p class="caption">The new field is optional. Existing rows need no backfill, and a bio can be added whenever someone is ready.</p>
+  <div class="code-layout">
+    <div class="diff-frame">
+      <a class="file-link" href="https://example.com/pull/42/files" title="db/migrations/add_profile_bio.sql" target="_blank" rel="noreferrer">db/migrations/add_profile_bio.sql</a>
+      <div class="diff-container" tabindex="0" role="region" aria-label="Diff for db/migrations/add_profile_bio.sql"></div>
+    </div>
+  </div>
+  <script type="application/json" class="slide-diff">"diff --git a/db/migrations/add_profile_bio.sql b/db/migrations/add_profile_bio.sql\n--- a/db/migrations/add_profile_bio.sql\n+++ b/db/migrations/add_profile_bio.sql\n@@ -0,0 +1,2 @@\n+ALTER TABLE users\n+  ADD COLUMN bio VARCHAR(280) NULL;\n"</script>
+  <script type="application/json" class="slide-callouts">[{"line":2,"side":"new","line_text":"  ADD COLUMN bio VARCHAR(280) NULL;","note":"Allowing NULL makes the change compatible with existing profiles.","kind":"info"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+  <p class="eyebrow">A closer look</p>
+  <div class="code-head"><h2>The limit belongs on the server too</h2></div>
+  <p class="caption">The editor helps people stay within 280 characters. The API enforces that limit for every caller.</p>
+  <div class="code-layout">
+    <div class="diff-frame">
+      <a class="file-link" href="https://example.com/pull/42/files" title="src/users/users.service.ts" target="_blank" rel="noreferrer">src/users/users.service.ts</a>
+      <div class="diff-container" tabindex="0" role="region" aria-label="Diff for src/users/users.service.ts"></div>
+    </div>
+  </div>
+  <script type="application/json" class="slide-diff">"diff --git a/src/users/users.service.ts b/src/users/users.service.ts\n--- a/src/users/users.service.ts\n+++ b/src/users/users.service.ts\n@@ -22,3 +22,13 @@\n   async findById(id: string) {\n     return this.repo.findOneByOrFail({ id });\n   }\n+\n+  async updateBio(userId: string, bio: string) {\n+    if (bio.length > 280) {\n+      throw new BadRequestException(\"Bio is too long\");\n+    }\n+\n+    const user = await this.repo.findOneByOrFail({ id: userId });\n+    user.bio = bio.trim();\n+    return this.repo.save(user);\n+  }\n"</script>
+  <script type="application/json" class="slide-callouts">[{"line":27,"side":"new","line_text":"    if (bio.length > 280) {","note":"Direct API requests cannot bypass the editor’s length limit.","kind":"info"},{"line":32,"side":"new","line_text":"    user.bio = bio.trim();","note":"Trim surrounding whitespace before saving the bio.","kind":"info"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+  <p class="eyebrow">A closer look</p>
+  <div class="code-head"><h2>Keep the same permission boundary</h2></div>
+  <p class="caption">Editing a bio uses the existing profile guard, so access stays limited to the owner and administrators.</p>
+  <div class="code-layout">
+    <div class="diff-frame">
+      <a class="file-link" href="https://example.com/pull/42/files" title="src/users/users.controller.ts" target="_blank" rel="noreferrer">src/users/users.controller.ts</a>
+      <div class="diff-container" tabindex="0" role="region" aria-label="Diff for src/users/users.controller.ts"></div>
+    </div>
+  </div>
+  <script type="application/json" class="slide-diff">"diff --git a/src/users/users.controller.ts b/src/users/users.controller.ts\n--- a/src/users/users.controller.ts\n+++ b/src/users/users.controller.ts\n@@ -40,1 +40,6 @@\n   // Profile routes\n+  @Patch(\":id/bio\")\n+  @UseGuards(SelfOrAdminGuard)\n+  updateBio(@Param(\"id\") id: string, @Body(\"bio\") bio: string) {\n+    return this.usersService.updateBio(id, bio);\n+  }\n"</script>
+  <script type="application/json" class="slide-callouts">[{"line":42,"side":"new","line_text":"  @UseGuards(SelfOrAdminGuard)","note":"This route reuses the profile permission check.","why":"Review the guard’s behavior for requests that target someone else’s profile.","kind":"risk"}]</script>
+</section>
+
+<section class="slide" data-kind="outro" aria-label="Open pull request">
+  <a class="mr-cta" href="https://example.com/pull/42" target="_blank" rel="noreferrer">Open pull request <span aria-hidden="true">↗</span></a>
+</section>
+  </main>
+
+  <nav class="deck-nav" aria-label="Slide navigation">
+    <span class="kbd-hint">Use <kbd>←</kbd> <kbd>→</kbd> to move through the story</span>
+    <div class="nav-buttons">
+      <button id="prevBtn" class="nav-btn" aria-label="Previous slide">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>
+      </button>
+      <button id="nextBtn" class="nav-btn" aria-label="Next slide">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m10 6 6 6-6 6"/></svg>
+      </button>
+    </div>
+  </nav>
+
+  <script id="manifest" type="application/json">
+    {
+  "mr_id": "42",
+  "mr_title": "Add a short bio to user profiles · example",
+  "mr_url": "https://example.com/pull/42",
+  "generated_at": "2026-11-13T00:00:00.000Z",
+  "commit_sha": null,
+  "slides": [
+    {
+      "kind": "cover",
+      "eyebrow": "A sample walkthrough",
+      "title": "A little more context on each profile",
+      "subtitle": "People can add a short bio. Leaving it blank keeps their profile just as it is today.",
+      "meta": {
+        "files_changed": 4,
+        "est_read_seconds": 90
+      },
+      "changes": [
+        {
+          "label": "DB migration",
+          "text": "Add an optional bio column."
+        },
+        {
+          "label": "Service",
+          "text": "Validate and save the bio."
+        },
+        {
+          "label": "Controller",
+          "text": "Reuse profile permissions."
+        },
+        {
+          "label": "Editor",
+          "text": "Expose the new bio field."
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Existing profiles keep working",
+      "caption": "The new field is optional. Existing rows need no backfill, and a bio can be added whenever someone is ready.",
+      "file": "db/migrations/add_profile_bio.sql",
+      "file_url": "https://example.com/pull/42/files",
+      "diff": "diff --git a/db/migrations/add_profile_bio.sql b/db/migrations/add_profile_bio.sql\n--- a/db/migrations/add_profile_bio.sql\n+++ b/db/migrations/add_profile_bio.sql\n@@ -0,0 +1,2 @@\n+ALTER TABLE users\n+  ADD COLUMN bio VARCHAR(280) NULL;\n",
+      "callouts": [
+        {
+          "line": 2,
+          "side": "new",
+          "line_text": "  ADD COLUMN bio VARCHAR(280) NULL;",
+          "note": "Allowing NULL makes the change compatible with existing profiles.",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "The limit belongs on the server too",
+      "caption": "The editor helps people stay within 280 characters. The API enforces that limit for every caller.",
+      "file": "src/users/users.service.ts",
+      "file_url": "https://example.com/pull/42/files",
+      "diff": "diff --git a/src/users/users.service.ts b/src/users/users.service.ts\n--- a/src/users/users.service.ts\n+++ b/src/users/users.service.ts\n@@ -22,3 +22,13 @@\n   async findById(id: string) {\n     return this.repo.findOneByOrFail({ id });\n   }\n+\n+  async updateBio(userId: string, bio: string) {\n+    if (bio.length > 280) {\n+      throw new BadRequestException(\"Bio is too long\");\n+    }\n+\n+    const user = await this.repo.findOneByOrFail({ id: userId });\n+    user.bio = bio.trim();\n+    return this.repo.save(user);\n+  }\n",
+      "callouts": [
+        {
+          "line": 27,
+          "side": "new",
+          "line_text": "    if (bio.length > 280) {",
+          "note": "Direct API requests cannot bypass the editor’s length limit.",
+          "kind": "info"
+        },
+        {
+          "line": 32,
+          "side": "new",
+          "line_text": "    user.bio = bio.trim();",
+          "note": "Trim surrounding whitespace before saving the bio.",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Keep the same permission boundary",
+      "caption": "Editing a bio uses the existing profile guard, so access stays limited to the owner and administrators.",
+      "file": "src/users/users.controller.ts",
+      "file_url": "https://example.com/pull/42/files",
+      "diff": "diff --git a/src/users/users.controller.ts b/src/users/users.controller.ts\n--- a/src/users/users.controller.ts\n+++ b/src/users/users.controller.ts\n@@ -40,1 +40,6 @@\n   // Profile routes\n+  @Patch(\":id/bio\")\n+  @UseGuards(SelfOrAdminGuard)\n+  updateBio(@Param(\"id\") id: string, @Body(\"bio\") bio: string) {\n+    return this.usersService.updateBio(id, bio);\n+  }\n",
+      "callouts": [
+        {
+          "line": 42,
+          "side": "new",
+          "line_text": "  @UseGuards(SelfOrAdminGuard)",
+          "note": "This route reuses the profile permission check.",
+          "why": "Review the guard’s behavior for requests that target someone else’s profile.",
+          "kind": "risk"
+        }
+      ]
+    },
+    {
+      "kind": "outro",
+      "mr_url": "https://example.com/pull/42"
+    }
+  ]
+}
+  </script>
+  <script src="vendor/diff2html/diff2html-ui.min.js"></script>
+  <script src="deck.js"></script>
+</body>
+</html>

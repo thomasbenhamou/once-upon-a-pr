@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Once Upon a PR</title>
+  <link rel="stylesheet" href="vendor/diff2html/diff2html.min.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="deck-header">
+    <span class="deck-title" id="deckTitle">Once Upon a PR</span>
+    <div class="deck-progress">
+      <span class="frac"><span id="slideIndex">1</span> / <span id="slideTotal">1</span></span>
+      <div class="bar" id="progressBar">
+        <svg class="bar-sketch" aria-hidden="true"></svg>
+        <div class="bar-fill" id="barFill"></div>
+      </div>
+    </div>
+  </header>
+
+  <main id="slides">
+    <section class="slide active" data-kind="cover">
+  <h1>Network Retry Stays Sandboxed</h1>
+  <p class="subtitle">VS Code terminal tool retries blocked network access before unsandboxing</p>
+  <ul class="bullets">
+  <li><span class="tag tag-fix">fix</span> network failures retry with <mark>requestAllowNetwork</mark> first</li>
+  <li><span class="tag tag-new">new</span> schema adds network request and reason fields</li>
+  <li><span class="tag tag-risk">risk</span> auto-approval no longer covers relaxed network<span class="bullet-why">Network-relaxed commands now force confirmation; missed UI plumbing would silently hide why access is requested.</span></li>
+  <li><span class="tag tag-refactor">refactor</span> retry predicates split network from sandbox violations</li>
+</ul>
+  <div class="meta">
+  <span class="shape shape-fix">fix</span>
+  <span><strong>by</strong>dileepyavan</span>
+  <span><strong>branch</strong>DileepY/retry-allowNetwork</span>
+  <span><strong>+863</strong>/<strong>-144</strong></span>
+  <span><strong>21</strong>files</span>
+  <span class="read-time">~3m 10s read</span>
+</div>
+</section>
+
+<section class="slide" data-kind="section">
+  <h2>The Retry Path</h2>
+  <p class="caption">One new permission layer before unsandboxing</p>
+  <ul class="bullets">
+  <li><span class="tag tag-new">new</span> model can ask for sandboxed network access</li>
+  <li><span class="tag tag-fix">fix</span> network-looking failures avoid unsandboxed retry</li>
+  <li><span class="tag tag-risk">risk</span> confirmations must explain network relaxation<span class="bullet-why">Without explicit reasons, reviewers cannot distinguish sandboxed network access from full unsandboxing.</span></li>
+</ul>
+</section>
+
+<section class="slide" data-kind="code">
+  <div class="code-head">
+    <h3>The Tool Learns The Option</h3>
+    <a class="file-link" href="https://github.com/microsoft/vscode/pull/319181/files" target="_blank" rel="noreferrer">src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts</a>
+  </div>
+  <p class="caption">Model instructions, schema, and request state line up</p>
+  <div class="diff-frame">
+    <svg class="frame-sketch" aria-hidden="true"></svg>
+    <div class="diff-container"></div>
+  </div>
+  <script type="application/x-diff" class="slide-diff">diff --git a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts
+index 2f6f6ece6c415..7e5209dfcfe98 100644
+--- a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts
++++ b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts
+@@ -166,6 +166,13 @@ function createSandboxLines(allowToRunUnsandboxedCommands: boolean, networkDomai
+ 		'- When executing commands within the sandboxed environment, all operations requiring a temporary directory must utilize the $TMPDIR environment variable. The /tmp directory is not guaranteed to be accessible or writable and must be avoided',
+ 		'- Tools and scripts should respect the TMPDIR environment variable, which is automatically set to an appropriate path within the sandbox',
+ 	];
++	if (retryWithAllowNetworkRequests) {
++		lines.push(
++			'- When a command fails due to network access being blocked by the sandbox, immediately re-run it with requestAllowNetwork=true and provide requestAllowNetworkReason. This keeps the command in the sandbox with unrestricted network access and automatically shows a confirmation prompt to the user',
++			'- Only set requestAllowNetwork=true when there is evidence of network failures caused by the sandbox, e.g. \'Network request failed\' errors, API call failures, or other indications of blocked network access in the command output',
++			'- When setting requestAllowNetwork=true, also provide requestAllowNetworkReason explaining why the command needs network access',
++		);
++	}
+ 	if (allowToRunUnsandboxedCommands) {
+ 		lines.push(
+ 			'- When a command fails due to sandbox restrictions, immediately re-run it with requestUnsandboxedExecution=true. Do NOT ask the user for permission — setting this flag automatically shows a confirmation prompt to the user',
+@@ -341,6 +350,14 @@ export async function createRunInTerminalToolData(
+ 			type: 'string',
+ 			description: 'A short explanation of why this command must run outside the terminal sandbox. Only provide this when requestUnsandboxedExecution is true.'
+ 		},
++		requestAllowNetwork: {
++			type: 'boolean',
++			description: 'Request that this command remain in the terminal sandbox but run with unrestricted network access. Only set this when the command clearly needs network access but the required network access was blocked. The user will be prompted before network restrictions are relaxed.'
++		},
++		requestAllowNetworkReason: {
++			type: 'string',
++			description: 'A short explanation of why this sandboxed command needs unrestricted network access. Only provide this when requestAllowNetwork is true.'
++		}
+ 	} : {};
+ 
+ 	return {
+@@ -768,10 +857,14 @@ export class RunInTerminalTool extends Disposable implements IToolImpl {
+ 		]);
+ 		const language = os === OperatingSystem.Windows ? 'pwsh' : 'sh';
+ 		const isSandboxEnabled = sandboxPrereqs.enabled;
++		const isSandboxAllowNetworkEnabled = isSandboxEnabled && await this._terminalSandboxService.isSandboxAllowNetworkEnabled();
+ 		const allowUnsandboxedCommands = this._getAllowToRunUnsandboxedCommands(args);
+ 		const explicitUnsandboxRequest = isSandboxEnabled && allowUnsandboxedCommands && args.requestUnsandboxedExecution === true;
++		const explicitAllowNetworkRequest = isSandboxEnabled && !isSandboxAllowNetworkEnabled && this._retryWithAllowNetworkRequests && !explicitUnsandboxRequest && args.requestAllowNetwork === true;
+ 		let requiresUnsandboxConfirmation = explicitUnsandboxRequest;
+ 		let requestUnsandboxedExecutionReason = explicitUnsandboxRequest ? args.requestUnsandboxedExecutionReason : undefined;
++		let requiresAllowNetworkConfirmation = explicitAllowNetworkRequest;
++		let requestAllowNetworkReason = explicitAllowNetworkRequest ? args.requestAllowNetworkReason : undefined;
+ 
+ 		const missingDependencies = sandboxPrereqs.failedCheck === TerminalSandboxPrerequisiteCheck.Dependencies && sandboxPrereqs.missingDependencies?.length
+ 			? sandboxPrereqs.missingDependencies
+</script>
+  <script type="application/json" class="slide-callouts">[{"line":169,"side":"new","line_text":"if (retryWithAllowNetworkRequests) {","note":"gates model advice","kind":"info"},{"line":353,"side":"new","line_text":"requestAllowNetwork: {","note":"new boolean affordance","kind":"info"},{"line":863,"side":"new","line_text":"const explicitAllowNetworkRequest = isSandboxEnabled && !isSandboxAllowNetworkEnabled && this._retryWithAllowNetworkRequests && !explicitUnsandboxRequest && args.requestAllowNetwork === true;","note":"explicit request stays sandboxed","kind":"warn"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+  <div class="code-head">
+    <h3>Network Failures Get A Classifier</h3>
+    <a class="file-link" href="https://github.com/microsoft/vscode/pull/319181/files" target="_blank" rel="noreferrer">src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/sandboxOutputAnalyzer.ts</a>
+  </div>
+  <p class="caption">Output analysis separates network blocks from generic sandbox blocks</p>
+  <div class="diff-frame">
+    <svg class="frame-sketch" aria-hidden="true"></svg>
+    <div class="diff-container"></div>
+  </div>
+  <script type="application/x-diff" class="slide-diff">diff --git a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/sandboxOutputAnalyzer.ts b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/sandboxOutputAnalyzer.ts
+index 8ca6f476cc2ef..2158da2d69783 100644
+--- a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/sandboxOutputAnalyzer.ts
++++ b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/sandboxOutputAnalyzer.ts
+@@ -46,9 +49,13 @@ export class SandboxOutputAnalyzer extends Disposable implements IOutputAnalyzer
+ 		const prefix = knownFailure
+ 			? 'Command failed while running in sandboxed mode. If the command failed due to sandboxing:'
+ 			: 'Command ran in sandboxed mode and may have been blocked by the sandbox. If the command failed due to sandboxing:';
++		const retryWithAllowNetworkRequests = this._configurationService.getValue<boolean>(AgentSandboxSettingId.AgentSandboxRetryWithAllowNetworkRequests) === true;
++		const networkRecovery = retryWithAllowNetworkRequests
++			? '- If you determine from the output that the failure was caused by blocked network access, immediately retry the command with requestAllowNetwork=true and provide requestAllowNetworkReason. This keeps the command sandboxed with unrestricted network access and automatically shows a confirmation prompt to the user.\n- If it is not a network restriction, or the command still fails after retrying with requestAllowNetwork=true, immediately retry the command with requestUnsandboxedExecution=true and provide requestUnsandboxedExecutionReason. Do NOT ask the user - setting this flag automatically shows a confirmation prompt to the user.'
++			: '- Sandboxed execution with unrestricted network access is disabled by chat.agent.sandbox.retryWithAllowNetworkRequests. Do not set requestAllowNetwork=true.\n- If the command cannot be made to work by updating sandbox rules, immediately retry it with requestUnsandboxedExecution=true and provide requestUnsandboxedExecutionReason. Do NOT ask the user - setting this flag automatically shows a confirmation prompt to the user.';
+ 		return `${prefix}
+ - If it would be reasonable to extend the sandbox rules, work with the user to update allowWrite for file system access problems in ${fileSystemSetting}, or to add required domains to ${AgentNetworkDomainSettingId.AllowedNetworkDomains}.
+-- Otherwise, immediately retry the command with requestUnsandboxedExecution=true. Do NOT ask the user — setting this flag automatically shows a confirmation prompt to the user.
++${networkRecovery}
+ 
+ Here is the output of the command:\n`;
+ 	}
+@@ -74,3 +81,12 @@ export function outputLooksSandboxBlocked(output: string): boolean {
+ 	const normalized = output.replace(/\n/g, ' ');
+ 	return /Operation not permitted|Permission denied|Read-only file system|sandbox-exec|bwrap|sandbox_violation/i.test(normalized);
+ }
++
++/**
++ * Checks whether output clearly suggests a network failure. This is used only
++ * to prevent automatic unsandboxing; retry selection is left to the model.
++ */
++export function outputLooksSandboxNetworkBlocked(output: string): boolean {
++	const normalized = output.replace(/\n/g, ' ');
++	return /Could not resolve host|Temporary failure in name resolution|Name or service not known|EAI_AGAIN|ENETUNREACH|Network is unreachable|network (?:access )?(?:blocked|disabled)|(?:connect|socket).*(?:Operation not permitted|Permission denied)|(?:Operation not permitted|Permission denied).*(?:connect|socket)/i.test(normalized);
++}
+</script>
+  <script type="application/json" class="slide-callouts">[{"line":52,"side":"new","line_text":"const retryWithAllowNetworkRequests = this._configurationService.getValue<boolean>(AgentSandboxSettingId.AgentSandboxRetryWithAllowNetworkRequests) === true;","note":"setting drives advice","kind":"info"},{"line":58,"side":"new","line_text":"${networkRecovery}","note":"prompt swaps recovery path","kind":"warn"},{"line":91,"side":"new","line_text":"return /Could not resolve host|Temporary failure in name resolution|Name or service not known|EAI_AGAIN|ENETUNREACH|Network is unreachable|network (?:access )?(?:blocked|disabled)|(?:connect|socket).*(?:Operation not permitted|Permission denied)|(?:Operation not permitted|Permission denied).*(?:connect|socket)/i.test(normalized);","note":"network-block regex","kind":"risk","why":"Broad matching can classify ordinary outages as sandbox network blocks, creating needless permission prompts."}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+  <div class="code-head">
+    <h3>Sandbox Engine Carries The Flag</h3>
+    <a class="file-link" href="https://github.com/microsoft/vscode/pull/319181/files" target="_blank" rel="noreferrer">src/vs/platform/sandbox/common/terminalSandboxEngine.ts</a>
+  </div>
+  <p class="caption">Wrapping can relax network without leaving the sandbox</p>
+  <div class="diff-frame">
+    <svg class="frame-sketch" aria-hidden="true"></svg>
+    <div class="diff-container"></div>
+  </div>
+  <script type="application/x-diff" class="slide-diff">diff --git a/src/vs/platform/sandbox/common/terminalSandboxEngine.ts b/src/vs/platform/sandbox/common/terminalSandboxEngine.ts
+index b1efdf4a5d02a..5d21a9e42f2ae 100644
+--- a/src/vs/platform/sandbox/common/terminalSandboxEngine.ts
++++ b/src/vs/platform/sandbox/common/terminalSandboxEngine.ts
+@@ -185,7 +190,13 @@ export class TerminalSandboxEngine extends Disposable {
+ 		return { allowedDomains, deniedDomains };
+ 	}
+ 
+-	async wrapCommand(command: string, requestUnsandboxedExecution?: boolean, shell?: string, cwd?: URI, commandDetails?: readonly ITerminalSandboxCommand[]): Promise<ITerminalSandboxWrapResult> {
++	async wrapCommand(command: string, requestUnsandboxedExecution?: boolean, shell?: string, cwd?: URI, commandDetails?: readonly ITerminalSandboxCommand[], requestAllowNetwork?: boolean): Promise<ITerminalSandboxWrapResult> {
++		const allowUnsandboxedCommands = this._areUnsandboxedCommandsAllowed();
++		const retryWithAllowNetworkRequests = this._areRetryWithAllowNetworkRequestsAllowed();
++		const shouldInspectBlockedDomains = requestUnsandboxedExecution !== true && requestAllowNetwork !== true && (retryWithAllowNetworkRequests || allowUnsandboxedCommands);
++		const blockedDomainResult = shouldInspectBlockedDomains ? this._getBlockedDomains(command) : { blockedDomains: [], deniedDomains: [] };
++		const requiresPreflightAllowNetwork = retryWithAllowNetworkRequests && blockedDomainResult.blockedDomains.length > 0;
++		const allowNetworkForCommand = requestUnsandboxedExecution !== true && ((requestAllowNetwork === true && retryWithAllowNetworkRequests) || requiresPreflightAllowNetwork);
+ 		const normalizedCommandDetails = this._normalizeCommandDetails(commandDetails ?? []);
+ 		const normalizedCommandKeywords = this._normalizeCommandKeywords(normalizedCommandDetails.map(c => c.keyword));
+ 		const currentReadAllowListPaths = getTerminalSandboxReadAllowListForCommands(this._os, this._commandAllowListKeywords, this._commandAllowListCommandDetails);
+@@ -212,11 +225,9 @@ export class TerminalSandboxEngine extends Disposable {
+ 			throw new Error('Sandbox config path or temp dir not initialized');
+ 		}
+ 
+-		const allowUnsandboxedCommands = this._areUnsandboxedCommandsAllowed();
+-
+-		// Check if the command would attempt to access any blocked network domains before wrapping it in the sandbox.
+-		const blockedDomainResult = requestUnsandboxedExecution || !allowUnsandboxedCommands ? { blockedDomains: [], deniedDomains: [] } : this._getBlockedDomains(command);
+-		if (!requestUnsandboxedExecution && allowUnsandboxedCommands && blockedDomainResult.blockedDomains.length > 0) {
++		// If per-command network relaxation is disabled, preserve the existing
++		// unsandbox fallback for commands with statically-detected blocked domains.
++		if (!requestUnsandboxedExecution && !retryWithAllowNetworkRequests && allowUnsandboxedCommands && blockedDomainResult.blockedDomains.length > 0) {
+ 			return {
+ 				command: this._wrapUnsandboxedCommand(command, shell),
+ 				isSandboxWrapped: false,
+@@ -241,6 +257,8 @@ export class TerminalSandboxEngine extends Disposable {
+ 			return {
+ 				command: this._windowsMxcRuntime.wrapCommand(this._mxcPath, this._sandboxConfigPath),
+ 				isSandboxWrapped: true,
++				requiresAllowNetworkConfirmation: allowNetworkForCommand && !this._isSandboxAllowNetworkConfigured() ? true : undefined,
++				...allowNetworkConfirmationMetadata,
+ 			};
+ 		}
+ 
+@@ -562,7 +584,7 @@ export class TerminalSandboxEngine extends Disposable {
+ 			return undefined;
+ 		}
+ 
+-		const allowNetwork = await this.isSandboxAllowNetworkEnabled();
++		const allowNetwork = this._commandAllowNetwork || await this.isSandboxAllowNetworkEnabled();
+ 		const linuxFileSystemSetting = this._os === OperatingSystem.Linux
+ 			? this._getSettingValue<ITerminalSandboxFileSystemSetting>(AgentSandboxSettingId.AgentSandboxLinuxFileSystem) ?? {}
+ 			: {};
+</script>
+  <script type="application/json" class="slide-callouts">[{"line":199,"side":"new","line_text":"const allowNetworkForCommand = requestUnsandboxedExecution !== true && ((requestAllowNetwork === true && retryWithAllowNetworkRequests) || requiresPreflightAllowNetwork);","note":"sandbox-preserving flag","kind":"info"},{"line":230,"side":"new","line_text":"if (!requestUnsandboxedExecution && !retryWithAllowNetworkRequests && allowUnsandboxedCommands && blockedDomainResult.blockedDomains.length > 0) {","note":"legacy unsandbox fallback","kind":"warn"},{"line":260,"side":"new","line_text":"requiresAllowNetworkConfirmation: allowNetworkForCommand && !this._isSandboxAllowNetworkConfigured() ? true : undefined,","note":"confirmation metadata","kind":"info"},{"line":587,"side":"new","line_text":"const allowNetwork = this._commandAllowNetwork || await this.isSandboxAllowNetworkEnabled();","note":"per-command config flip","kind":"warn"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+  <div class="code-head">
+    <h3>Retry Predicate Splits Escalation</h3>
+    <a class="file-link" href="https://github.com/microsoft/vscode/pull/319181/files" target="_blank" rel="noreferrer">src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts</a>
+  </div>
+  <p class="caption">Network-looking failures use a sandboxed retry predicate</p>
+  <div class="diff-frame">
+    <svg class="frame-sketch" aria-hidden="true"></svg>
+    <div class="diff-container"></div>
+  </div>
+  <script type="application/x-diff" class="slide-diff">diff --git a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts
+index 2f6f6ece6c415..7e5209dfcfe98 100644
+--- a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts
++++ b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts
+@@ -427,15 +460,56 @@ export interface IAutomaticUnsandboxRetryOptions {
+ 	readonly output: string;
+ }
+ 
+-export function shouldAutomaticallyRetryUnsandboxed(options: IAutomaticUnsandboxRetryOptions): boolean {
+-	return options.allowUnsandboxedCommands
++export interface IAutomaticAllowNetworkRetryOptions {
++	readonly retryWithAllowNetworkRequests: boolean;
++	readonly didSandboxWrapCommand: boolean;
++	readonly requestUnsandboxedExecution: boolean;
++	readonly requestAllowNetwork: boolean;
++	readonly isPersistentSession: boolean;
++	readonly isBackgroundExecution: boolean;
++	readonly didTimeout: boolean;
++	readonly exitCode: number | undefined;
++	readonly output: string;
++}
++
++function shouldAutomaticallyRetrySandbox(options: IAutomaticSandboxRetryPredicateOptions): boolean {
++	return options.retryAllowed
+ 		&& options.didSandboxWrapCommand
+-		&& options.requestUnsandboxedExecution !== true
++		&& options.retryAlreadyRequested !== true
+ 		&& !options.isPersistentSession
+ 		&& !options.isBackgroundExecution
+ 		&& !options.didTimeout
+ 		&& options.exitCode !== 0
+-		&& outputLooksSandboxBlocked(options.output);
++		&& options.outputLooksRetryable(options.output);
++}
++
++export function shouldAutomaticallyRetryUnsandboxed(options: IAutomaticUnsandboxRetryOptions): boolean {
++	return shouldAutomaticallyRetrySandbox({
++		retryAllowed: options.allowUnsandboxedCommands,
++		retryAlreadyRequested: options.requestUnsandboxedExecution,
++		didSandboxWrapCommand: options.didSandboxWrapCommand,
++		isPersistentSession: options.isPersistentSession,
++		isBackgroundExecution: options.isBackgroundExecution,
++		didTimeout: options.didTimeout,
++		exitCode: options.exitCode,
++		output: options.output,
++		// Network failures are handled by shouldAutomaticallyRetryAllowNetworkInSandboxed; do not automatically leave the sandbox for them.
++		outputLooksRetryable: output => outputLooksSandboxBlocked(output) && !outputLooksSandboxNetworkBlocked(output),
++	});
++}
++
++export function shouldAutomaticallyRetryAllowNetworkInSandboxed(options: IAutomaticAllowNetworkRetryOptions): boolean {
++	return shouldAutomaticallyRetrySandbox({
++		retryAllowed: options.retryWithAllowNetworkRequests,
++		retryAlreadyRequested: options.requestUnsandboxedExecution || options.requestAllowNetwork,
++		didSandboxWrapCommand: options.didSandboxWrapCommand,
++		isPersistentSession: options.isPersistentSession,
++		isBackgroundExecution: options.isBackgroundExecution,
++		didTimeout: options.didTimeout,
++		exitCode: options.exitCode,
++		output: options.output,
++		outputLooksRetryable: outputLooksSandboxNetworkBlocked,
++	});
+ }
+ 
+ /**
+</script>
+  <script type="application/json" class="slide-callouts">[{"line":497,"side":"new","line_text":"outputLooksRetryable: output => outputLooksSandboxBlocked(output) && !outputLooksSandboxNetworkBlocked(output),","note":"network avoids unsandboxing","kind":"warn"},{"line":501,"side":"new","line_text":"export function shouldAutomaticallyRetryAllowNetworkInSandboxed(options: IAutomaticAllowNetworkRetryOptions): boolean {","note":"new retry predicate","kind":"info"},{"line":504,"side":"new","line_text":"retryAlreadyRequested: options.requestUnsandboxedExecution || options.requestAllowNetwork,","note":"prevents repeated escalation","kind":"warn"},{"line":511,"side":"new","line_text":"outputLooksRetryable: outputLooksSandboxNetworkBlocked,","note":"network-only trigger","kind":"info"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+  <div class="code-head">
+    <h3>Relaxed Network Forces Confirmation</h3>
+    <a class="file-link" href="https://github.com/microsoft/vscode/pull/319181/files" target="_blank" rel="noreferrer">src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts</a>
+  </div>
+  <p class="caption">Auto-approval yields to network-relaxation review</p>
+  <div class="diff-frame">
+    <svg class="frame-sketch" aria-hidden="true"></svg>
+    <div class="diff-container"></div>
+  </div>
+  <script type="application/x-diff" class="slide-diff">diff --git a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts
+index 2f6f6ece6c415..7e5209dfcfe98 100644
+--- a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts
++++ b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts
+@@ -1034,10 +1157,12 @@ export class RunInTerminalTool extends Disposable implements IToolImpl {
+ 			confirmationTitle = blockedDomains?.length
+ 				? localize('runInTerminal.unsandboxed.domain', "Run `{0}` command outside the [sandbox]({1}) to access {2}?", shellType, TERMINAL_SANDBOX_DOCUMENTATION_URL, this._formatBlockedDomainsForTitle(blockedDomains))
+ 				: localize('runInTerminal.unsandboxed', "Run `{0}` command outside the [sandbox]({1})?", shellType, TERMINAL_SANDBOX_DOCUMENTATION_URL);
++		} else if (requiresAllowNetworkConfirmation) {
++			confirmationTitle = localize('runInTerminal.allowNetwork', "Allow the sandbox to run `{0}` command with unrestricted network access.", shellType);
+ 		}
+ 
+ 		// If forceConfirmationReason is set, always show confirmation regardless of auto-approval
+-		const shouldShowConfirmation = (!isFinalAutoApproved && !isSessionAutoApproved) || context.forceConfirmationReason !== undefined;
++		const shouldShowConfirmation = (!isFinalAutoApproved && (!isSessionAutoApproved || requiresAllowNetworkConfirmation)) || context.forceConfirmationReason !== undefined;
+ 		const explanation = args.explanation || localize('runInTerminal.defaultExplanation', "No explanation provided");
+ 		const goal = args.goal || localize('runInTerminal.defaultGoal', "No goal provided");
+ 		const confirmationMessage = requiresUnsandboxConfirmation
+@@ -1048,7 +1173,15 @@ export class RunInTerminalTool extends Disposable implements IToolImpl {
+ 				goal,
+ 				requestUnsandboxedExecutionReason || localize('runInTerminal.unsandboxed.confirmationMessage.defaultReason', "The model indicated that this command needs unsandboxed access.")
+ 			))
+-			: new MarkdownString(localize('runInTerminal.confirmationMessage', "Explanation: {0}\n\nGoal: {1}", explanation, goal));
++			: requiresAllowNetworkConfirmation
++				? new MarkdownString(localize(
++					'runInTerminal.allowNetwork.confirmationMessage',
++					"Explanation: {0}\n\nGoal: {1}\n\nReason for allowing unrestricted network access in the sandbox: {2}",
++					explanation,
++					goal,
++					requestAllowNetworkReason || localize('runInTerminal.allowNetwork.confirmationMessage.defaultReason', "The model indicated that this sandboxed command needs unrestricted network access.")
++				))
++				: new MarkdownString(localize('runInTerminal.confirmationMessage', "Explanation: {0}\n\nGoal: {1}", explanation, goal));
+ 		const confirmationMessages = shouldShowConfirmation ? {
+ 			title: confirmationTitle,
+ 			message: confirmationMessage,
+</script>
+  <script type="application/json" class="slide-callouts">[{"line":1161,"side":"new","line_text":"confirmationTitle = localize('runInTerminal.allowNetwork', \"Allow the sandbox to run `{0}` command with unrestricted network access.\", shellType);","note":"distinct permission title","kind":"info"},{"line":1165,"side":"new","line_text":"const shouldShowConfirmation = (!isFinalAutoApproved && (!isSessionAutoApproved || requiresAllowNetworkConfirmation)) || context.forceConfirmationReason !== undefined;","note":"bypasses session auto-approval","kind":"warn"},{"line":1179,"side":"new","line_text":"\"Explanation: {0}\\n\\nGoal: {1}\\n\\nReason for allowing unrestricted network access in the sandbox: {2}\",","note":"reason surfaces in prompt","kind":"info"}]</script>
+</section>
+
+<section class="slide" data-kind="code">
+  <div class="code-head">
+    <h3>Tests Pin The Boundary</h3>
+    <a class="file-link" href="https://github.com/microsoft/vscode/pull/319181/files" target="_blank" rel="noreferrer">src/vs/workbench/contrib/terminalContrib/chatAgentTools/test/electron-browser/runInTerminalTool.test.ts</a>
+  </div>
+  <p class="caption">Regression tests guard retry order and repeated requests</p>
+  <div class="diff-frame">
+    <svg class="frame-sketch" aria-hidden="true"></svg>
+    <div class="diff-container"></div>
+  </div>
+  <script type="application/x-diff" class="slide-diff">diff --git a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/test/electron-browser/runInTerminalTool.test.ts b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/test/electron-browser/runInTerminalTool.test.ts
+index 86046bf33cf14..c0c2770876816 100644
+--- a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/test/electron-browser/runInTerminalTool.test.ts
++++ b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/test/electron-browser/runInTerminalTool.test.ts
+@@ -736,6 +810,36 @@ suite('RunInTerminalTool', () => {
+ 			}), false);
+ 		});
+ 
++		test('should not automatically retry outside the sandbox for apparent network failures', () => {
++			strictEqual(shouldAutomaticallyRetryUnsandboxed({
++				...baseRetryOptions,
++				output: 'connect: Operation not permitted',
++			}), false);
++		});
++
++		test('should retry in the sandbox by allowing network for apparent network failures', () => {
++			strictEqual(shouldAutomaticallyRetryAllowNetworkInSandboxed(baseAllowNetworkRetryOptions), true);
++		});
++
++		test('should not retry with allow-network when disabled or already requested', () => {
++			strictEqual(shouldAutomaticallyRetryAllowNetworkInSandboxed({
++				...baseAllowNetworkRetryOptions,
++				retryWithAllowNetworkRequests: false,
++			}), false);
++			strictEqual(shouldAutomaticallyRetryAllowNetworkInSandboxed({
++				...baseAllowNetworkRetryOptions,
++				requestAllowNetwork: true,
++			}), false);
++			strictEqual(shouldAutomaticallyRetryAllowNetworkInSandboxed({
++				...baseAllowNetworkRetryOptions,
++				requestUnsandboxedExecution: true,
++			}), false);
++			strictEqual(shouldAutomaticallyRetryAllowNetworkInSandboxed({
++				...baseAllowNetworkRetryOptions,
++				output: 'regular command failure',
++			}), false);
++		});
++
+ 		test('should not retry background, timed-out, successful, or non-sandbox-blocked results', () => {
+ 			strictEqual(shouldAutomaticallyRetryUnsandboxed({
+ 				...baseRetryOptions,
+</script>
+  <script type="application/json" class="slide-callouts">[{"line":813,"side":"new","line_text":"test('should not automatically retry outside the sandbox for apparent network failures', () => {","note":"blocks unsafe fallback","kind":"warn"},{"line":820,"side":"new","line_text":"test('should retry in the sandbox by allowing network for apparent network failures', () => {","note":"positive allow-network path","kind":"info"},{"line":824,"side":"new","line_text":"test('should not retry with allow-network when disabled or already requested', () => {","note":"prevents retry loops","kind":"warn"}]</script>
+</section>
+
+<section class="slide" data-kind="skipped">
+  <h2>Not in the deck</h2>
+  <p class="caption">Skim these in the platform UI</p>
+  <ul class="skipped-groups">
+  <li><span class="skipped-count">4</span> mirror tests</li>
+  <li><span class="skipped-count">3</span> type-only changes</li>
+  <li><span class="skipped-count">6</span> settings plumbing</li>
+  <li><span class="skipped-count">1</span> ui detail</li>
+  <li><span class="skipped-count">1</span> lockfile churn</li>
+  </ul>
+</section>
+
+<section class="slide" data-kind="outro">
+  <h2>Where to start</h2>
+  <ul class="bullets">
+  <li>start in <mark>runInTerminalTool.ts</mark> retry predicates<a class="bullet-file-link" href="https://github.com/microsoft/vscode/pull/319181/files" title="src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts" target="_blank" rel="noreferrer">Review runInTerminalTool.ts</a></li>
+  <li>then inspect sandbox engine wrapCommand state<a class="bullet-file-link" href="https://github.com/microsoft/vscode/pull/319181/files" title="src/vs/platform/sandbox/common/terminalSandboxEngine.ts" target="_blank" rel="noreferrer">Review terminalSandboxEngine.ts</a></li>
+  <li><span class="tag tag-risk">risk</span> regex false positives can prompt needless network access<span class="bullet-why">The classifier is broad; reviewers should compare it against real sandbox error strings.</span><a class="bullet-file-link" href="https://github.com/microsoft/vscode/pull/319181/files" title="src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/sandboxOutputAnalyzer.ts" target="_blank" rel="noreferrer">Review sandboxOutputAnalyzer.ts</a></li>
+  <li>tests cover network-before-unsandbox ordering<a class="bullet-file-link" href="https://github.com/microsoft/vscode/pull/319181/files" title="src/vs/workbench/contrib/terminalContrib/chatAgentTools/test/electron-browser/runInTerminalTool.test.ts" target="_blank" rel="noreferrer">Review runInTerminalTool.test.ts</a></li>
+</ul>
+  <a class="mr-cta" href="https://github.com/microsoft/vscode/pull/319181" target="_blank" rel="noreferrer">Open the MR -&gt;</a>
+  <div class="deck-meta">21 files changed</div>
+</section>
+  </main>
+
+  <nav class="deck-nav" aria-label="Slide navigation">
+    <div class="kbd-hint" id="kbdHint">
+      <svg class="kbd-frame" aria-hidden="true"></svg>
+      <span class="kbd-caption">
+        <span class="kbd-glyph" aria-hidden="true">&#9000;</span>
+        <span class="kbd-keys">&#9664;&nbsp;&#9654;</span>
+        <span class="kbd-text">to navigate</span>
+      </span>
+    </div>
+    <div class="nav-buttons">
+      <button id="prevBtn" class="nav-btn" aria-label="Previous slide">
+        <svg class="nav-sketch" aria-hidden="true"></svg>
+        <span class="nav-arrow">&#9664;</span>
+      </button>
+      <button id="nextBtn" class="nav-btn" aria-label="Next slide">
+        <svg class="nav-sketch" aria-hidden="true"></svg>
+        <span class="nav-arrow">&#9654;</span>
+      </button>
+    </div>
+  </nav>
+
+  <script id="manifest" type="application/json">
+    {
+  "mr_id": "319181",
+  "mr_title": "Retry with AllowNetwork option before retrying outside the sandbox.",
+  "mr_url": "https://github.com/microsoft/vscode/pull/319181",
+  "generated_at": "2026-06-02T15:34:11.328Z",
+  "commit_sha": "3bf84ed6a8235fd2fde1b194e7b9863c89fd0aea",
+  "slides": [
+    {
+      "kind": "cover",
+      "title": "Network Retry Stays Sandboxed",
+      "subtitle": "VS Code terminal tool retries blocked network access before unsandboxing",
+      "bullets": [
+        "[fix] network failures retry with ==requestAllowNetwork== first",
+        "[new] schema adds network request and reason fields",
+        {
+          "text": "[risk] auto-approval no longer covers relaxed network",
+          "why": "Network-relaxed commands now force confirmation; missed UI plumbing would silently hide why access is requested."
+        },
+        "[refactor] retry predicates split network from sandbox violations"
+      ],
+      "meta": {
+        "author": "dileepyavan",
+        "branch": "DileepY/retry-allowNetwork",
+        "lines_added": 863,
+        "lines_removed": 144,
+        "files_changed": 21,
+        "shape": "fix",
+        "est_read_seconds": 190
+      }
+    },
+    {
+      "kind": "section",
+      "title": "The Retry Path",
+      "caption": "One new permission layer before unsandboxing",
+      "bullets": [
+        "[new] model can ask for sandboxed network access",
+        "[fix] network-looking failures avoid unsandboxed retry",
+        {
+          "text": "[risk] confirmations must explain network relaxation",
+          "why": "Without explicit reasons, reviewers cannot distinguish sandboxed network access from full unsandboxing."
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "The Tool Learns The Option",
+      "caption": "Model instructions, schema, and request state line up",
+      "file": "src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts",
+      "file_url": "https://github.com/microsoft/vscode/pull/319181/files",
+      "diff": "diff --git a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts\nindex 2f6f6ece6c415..7e5209dfcfe98 100644\n--- a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts\n+++ b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts\n@@ -166,6 +166,13 @@ function createSandboxLines(allowToRunUnsandboxedCommands: boolean, networkDomai\n \t\t'- When executing commands within the sandboxed environment, all operations requiring a temporary directory must utilize the $TMPDIR environment variable. The /tmp directory is not guaranteed to be accessible or writable and must be avoided',\n \t\t'- Tools and scripts should respect the TMPDIR environment variable, which is automatically set to an appropriate path within the sandbox',\n \t];\n+\tif (retryWithAllowNetworkRequests) {\n+\t\tlines.push(\n+\t\t\t'- When a command fails due to network access being blocked by the sandbox, immediately re-run it with requestAllowNetwork=true and provide requestAllowNetworkReason. This keeps the command in the sandbox with unrestricted network access and automatically shows a confirmation prompt to the user',\n+\t\t\t'- Only set requestAllowNetwork=true when there is evidence of network failures caused by the sandbox, e.g. \\'Network request failed\\' errors, API call failures, or other indications of blocked network access in the command output',\n+\t\t\t'- When setting requestAllowNetwork=true, also provide requestAllowNetworkReason explaining why the command needs network access',\n+\t\t);\n+\t}\n \tif (allowToRunUnsandboxedCommands) {\n \t\tlines.push(\n \t\t\t'- When a command fails due to sandbox restrictions, immediately re-run it with requestUnsandboxedExecution=true. Do NOT ask the user for permission — setting this flag automatically shows a confirmation prompt to the user',\n@@ -341,6 +350,14 @@ export async function createRunInTerminalToolData(\n \t\t\ttype: 'string',\n \t\t\tdescription: 'A short explanation of why this command must run outside the terminal sandbox. Only provide this when requestUnsandboxedExecution is true.'\n \t\t},\n+\t\trequestAllowNetwork: {\n+\t\t\ttype: 'boolean',\n+\t\t\tdescription: 'Request that this command remain in the terminal sandbox but run with unrestricted network access. Only set this when the command clearly needs network access but the required network access was blocked. The user will be prompted before network restrictions are relaxed.'\n+\t\t},\n+\t\trequestAllowNetworkReason: {\n+\t\t\ttype: 'string',\n+\t\t\tdescription: 'A short explanation of why this sandboxed command needs unrestricted network access. Only provide this when requestAllowNetwork is true.'\n+\t\t}\n \t} : {};\n \n \treturn {\n@@ -768,10 +857,14 @@ export class RunInTerminalTool extends Disposable implements IToolImpl {\n \t\t]);\n \t\tconst language = os === OperatingSystem.Windows ? 'pwsh' : 'sh';\n \t\tconst isSandboxEnabled = sandboxPrereqs.enabled;\n+\t\tconst isSandboxAllowNetworkEnabled = isSandboxEnabled && await this._terminalSandboxService.isSandboxAllowNetworkEnabled();\n \t\tconst allowUnsandboxedCommands = this._getAllowToRunUnsandboxedCommands(args);\n \t\tconst explicitUnsandboxRequest = isSandboxEnabled && allowUnsandboxedCommands && args.requestUnsandboxedExecution === true;\n+\t\tconst explicitAllowNetworkRequest = isSandboxEnabled && !isSandboxAllowNetworkEnabled && this._retryWithAllowNetworkRequests && !explicitUnsandboxRequest && args.requestAllowNetwork === true;\n \t\tlet requiresUnsandboxConfirmation = explicitUnsandboxRequest;\n \t\tlet requestUnsandboxedExecutionReason = explicitUnsandboxRequest ? args.requestUnsandboxedExecutionReason : undefined;\n+\t\tlet requiresAllowNetworkConfirmation = explicitAllowNetworkRequest;\n+\t\tlet requestAllowNetworkReason = explicitAllowNetworkRequest ? args.requestAllowNetworkReason : undefined;\n \n \t\tconst missingDependencies = sandboxPrereqs.failedCheck === TerminalSandboxPrerequisiteCheck.Dependencies && sandboxPrereqs.missingDependencies?.length\n \t\t\t? sandboxPrereqs.missingDependencies\n",
+      "callouts": [
+        {
+          "line": 169,
+          "side": "new",
+          "line_text": "if (retryWithAllowNetworkRequests) {",
+          "note": "gates model advice",
+          "kind": "info"
+        },
+        {
+          "line": 353,
+          "side": "new",
+          "line_text": "requestAllowNetwork: {",
+          "note": "new boolean affordance",
+          "kind": "info"
+        },
+        {
+          "line": 863,
+          "side": "new",
+          "line_text": "const explicitAllowNetworkRequest = isSandboxEnabled && !isSandboxAllowNetworkEnabled && this._retryWithAllowNetworkRequests && !explicitUnsandboxRequest && args.requestAllowNetwork === true;",
+          "note": "explicit request stays sandboxed",
+          "kind": "warn"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Network Failures Get A Classifier",
+      "caption": "Output analysis separates network blocks from generic sandbox blocks",
+      "file": "src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/sandboxOutputAnalyzer.ts",
+      "file_url": "https://github.com/microsoft/vscode/pull/319181/files",
+      "diff": "diff --git a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/sandboxOutputAnalyzer.ts b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/sandboxOutputAnalyzer.ts\nindex 8ca6f476cc2ef..2158da2d69783 100644\n--- a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/sandboxOutputAnalyzer.ts\n+++ b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/sandboxOutputAnalyzer.ts\n@@ -46,9 +49,13 @@ export class SandboxOutputAnalyzer extends Disposable implements IOutputAnalyzer\n \t\tconst prefix = knownFailure\n \t\t\t? 'Command failed while running in sandboxed mode. If the command failed due to sandboxing:'\n \t\t\t: 'Command ran in sandboxed mode and may have been blocked by the sandbox. If the command failed due to sandboxing:';\n+\t\tconst retryWithAllowNetworkRequests = this._configurationService.getValue<boolean>(AgentSandboxSettingId.AgentSandboxRetryWithAllowNetworkRequests) === true;\n+\t\tconst networkRecovery = retryWithAllowNetworkRequests\n+\t\t\t? '- If you determine from the output that the failure was caused by blocked network access, immediately retry the command with requestAllowNetwork=true and provide requestAllowNetworkReason. This keeps the command sandboxed with unrestricted network access and automatically shows a confirmation prompt to the user.\\n- If it is not a network restriction, or the command still fails after retrying with requestAllowNetwork=true, immediately retry the command with requestUnsandboxedExecution=true and provide requestUnsandboxedExecutionReason. Do NOT ask the user - setting this flag automatically shows a confirmation prompt to the user.'\n+\t\t\t: '- Sandboxed execution with unrestricted network access is disabled by chat.agent.sandbox.retryWithAllowNetworkRequests. Do not set requestAllowNetwork=true.\\n- If the command cannot be made to work by updating sandbox rules, immediately retry it with requestUnsandboxedExecution=true and provide requestUnsandboxedExecutionReason. Do NOT ask the user - setting this flag automatically shows a confirmation prompt to the user.';\n \t\treturn `${prefix}\n - If it would be reasonable to extend the sandbox rules, work with the user to update allowWrite for file system access problems in ${fileSystemSetting}, or to add required domains to ${AgentNetworkDomainSettingId.AllowedNetworkDomains}.\n-- Otherwise, immediately retry the command with requestUnsandboxedExecution=true. Do NOT ask the user — setting this flag automatically shows a confirmation prompt to the user.\n+${networkRecovery}\n \n Here is the output of the command:\\n`;\n \t}\n@@ -74,3 +81,12 @@ export function outputLooksSandboxBlocked(output: string): boolean {\n \tconst normalized = output.replace(/\\n/g, ' ');\n \treturn /Operation not permitted|Permission denied|Read-only file system|sandbox-exec|bwrap|sandbox_violation/i.test(normalized);\n }\n+\n+/**\n+ * Checks whether output clearly suggests a network failure. This is used only\n+ * to prevent automatic unsandboxing; retry selection is left to the model.\n+ */\n+export function outputLooksSandboxNetworkBlocked(output: string): boolean {\n+\tconst normalized = output.replace(/\\n/g, ' ');\n+\treturn /Could not resolve host|Temporary failure in name resolution|Name or service not known|EAI_AGAIN|ENETUNREACH|Network is unreachable|network (?:access )?(?:blocked|disabled)|(?:connect|socket).*(?:Operation not permitted|Permission denied)|(?:Operation not permitted|Permission denied).*(?:connect|socket)/i.test(normalized);\n+}\n",
+      "callouts": [
+        {
+          "line": 52,
+          "side": "new",
+          "line_text": "const retryWithAllowNetworkRequests = this._configurationService.getValue<boolean>(AgentSandboxSettingId.AgentSandboxRetryWithAllowNetworkRequests) === true;",
+          "note": "setting drives advice",
+          "kind": "info"
+        },
+        {
+          "line": 58,
+          "side": "new",
+          "line_text": "${networkRecovery}",
+          "note": "prompt swaps recovery path",
+          "kind": "warn"
+        },
+        {
+          "line": 91,
+          "side": "new",
+          "line_text": "return /Could not resolve host|Temporary failure in name resolution|Name or service not known|EAI_AGAIN|ENETUNREACH|Network is unreachable|network (?:access )?(?:blocked|disabled)|(?:connect|socket).*(?:Operation not permitted|Permission denied)|(?:Operation not permitted|Permission denied).*(?:connect|socket)/i.test(normalized);",
+          "note": "network-block regex",
+          "kind": "risk",
+          "why": "Broad matching can classify ordinary outages as sandbox network blocks, creating needless permission prompts."
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Sandbox Engine Carries The Flag",
+      "caption": "Wrapping can relax network without leaving the sandbox",
+      "file": "src/vs/platform/sandbox/common/terminalSandboxEngine.ts",
+      "file_url": "https://github.com/microsoft/vscode/pull/319181/files",
+      "diff": "diff --git a/src/vs/platform/sandbox/common/terminalSandboxEngine.ts b/src/vs/platform/sandbox/common/terminalSandboxEngine.ts\nindex b1efdf4a5d02a..5d21a9e42f2ae 100644\n--- a/src/vs/platform/sandbox/common/terminalSandboxEngine.ts\n+++ b/src/vs/platform/sandbox/common/terminalSandboxEngine.ts\n@@ -185,7 +190,13 @@ export class TerminalSandboxEngine extends Disposable {\n \t\treturn { allowedDomains, deniedDomains };\n \t}\n \n-\tasync wrapCommand(command: string, requestUnsandboxedExecution?: boolean, shell?: string, cwd?: URI, commandDetails?: readonly ITerminalSandboxCommand[]): Promise<ITerminalSandboxWrapResult> {\n+\tasync wrapCommand(command: string, requestUnsandboxedExecution?: boolean, shell?: string, cwd?: URI, commandDetails?: readonly ITerminalSandboxCommand[], requestAllowNetwork?: boolean): Promise<ITerminalSandboxWrapResult> {\n+\t\tconst allowUnsandboxedCommands = this._areUnsandboxedCommandsAllowed();\n+\t\tconst retryWithAllowNetworkRequests = this._areRetryWithAllowNetworkRequestsAllowed();\n+\t\tconst shouldInspectBlockedDomains = requestUnsandboxedExecution !== true && requestAllowNetwork !== true && (retryWithAllowNetworkRequests || allowUnsandboxedCommands);\n+\t\tconst blockedDomainResult = shouldInspectBlockedDomains ? this._getBlockedDomains(command) : { blockedDomains: [], deniedDomains: [] };\n+\t\tconst requiresPreflightAllowNetwork = retryWithAllowNetworkRequests && blockedDomainResult.blockedDomains.length > 0;\n+\t\tconst allowNetworkForCommand = requestUnsandboxedExecution !== true && ((requestAllowNetwork === true && retryWithAllowNetworkRequests) || requiresPreflightAllowNetwork);\n \t\tconst normalizedCommandDetails = this._normalizeCommandDetails(commandDetails ?? []);\n \t\tconst normalizedCommandKeywords = this._normalizeCommandKeywords(normalizedCommandDetails.map(c => c.keyword));\n \t\tconst currentReadAllowListPaths = getTerminalSandboxReadAllowListForCommands(this._os, this._commandAllowListKeywords, this._commandAllowListCommandDetails);\n@@ -212,11 +225,9 @@ export class TerminalSandboxEngine extends Disposable {\n \t\t\tthrow new Error('Sandbox config path or temp dir not initialized');\n \t\t}\n \n-\t\tconst allowUnsandboxedCommands = this._areUnsandboxedCommandsAllowed();\n-\n-\t\t// Check if the command would attempt to access any blocked network domains before wrapping it in the sandbox.\n-\t\tconst blockedDomainResult = requestUnsandboxedExecution || !allowUnsandboxedCommands ? { blockedDomains: [], deniedDomains: [] } : this._getBlockedDomains(command);\n-\t\tif (!requestUnsandboxedExecution && allowUnsandboxedCommands && blockedDomainResult.blockedDomains.length > 0) {\n+\t\t// If per-command network relaxation is disabled, preserve the existing\n+\t\t// unsandbox fallback for commands with statically-detected blocked domains.\n+\t\tif (!requestUnsandboxedExecution && !retryWithAllowNetworkRequests && allowUnsandboxedCommands && blockedDomainResult.blockedDomains.length > 0) {\n \t\t\treturn {\n \t\t\t\tcommand: this._wrapUnsandboxedCommand(command, shell),\n \t\t\t\tisSandboxWrapped: false,\n@@ -241,6 +257,8 @@ export class TerminalSandboxEngine extends Disposable {\n \t\t\treturn {\n \t\t\t\tcommand: this._windowsMxcRuntime.wrapCommand(this._mxcPath, this._sandboxConfigPath),\n \t\t\t\tisSandboxWrapped: true,\n+\t\t\t\trequiresAllowNetworkConfirmation: allowNetworkForCommand && !this._isSandboxAllowNetworkConfigured() ? true : undefined,\n+\t\t\t\t...allowNetworkConfirmationMetadata,\n \t\t\t};\n \t\t}\n \n@@ -562,7 +584,7 @@ export class TerminalSandboxEngine extends Disposable {\n \t\t\treturn undefined;\n \t\t}\n \n-\t\tconst allowNetwork = await this.isSandboxAllowNetworkEnabled();\n+\t\tconst allowNetwork = this._commandAllowNetwork || await this.isSandboxAllowNetworkEnabled();\n \t\tconst linuxFileSystemSetting = this._os === OperatingSystem.Linux\n \t\t\t? this._getSettingValue<ITerminalSandboxFileSystemSetting>(AgentSandboxSettingId.AgentSandboxLinuxFileSystem) ?? {}\n \t\t\t: {};\n",
+      "callouts": [
+        {
+          "line": 199,
+          "side": "new",
+          "line_text": "const allowNetworkForCommand = requestUnsandboxedExecution !== true && ((requestAllowNetwork === true && retryWithAllowNetworkRequests) || requiresPreflightAllowNetwork);",
+          "note": "sandbox-preserving flag",
+          "kind": "info"
+        },
+        {
+          "line": 230,
+          "side": "new",
+          "line_text": "if (!requestUnsandboxedExecution && !retryWithAllowNetworkRequests && allowUnsandboxedCommands && blockedDomainResult.blockedDomains.length > 0) {",
+          "note": "legacy unsandbox fallback",
+          "kind": "warn"
+        },
+        {
+          "line": 260,
+          "side": "new",
+          "line_text": "requiresAllowNetworkConfirmation: allowNetworkForCommand && !this._isSandboxAllowNetworkConfigured() ? true : undefined,",
+          "note": "confirmation metadata",
+          "kind": "info"
+        },
+        {
+          "line": 587,
+          "side": "new",
+          "line_text": "const allowNetwork = this._commandAllowNetwork || await this.isSandboxAllowNetworkEnabled();",
+          "note": "per-command config flip",
+          "kind": "warn"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Retry Predicate Splits Escalation",
+      "caption": "Network-looking failures use a sandboxed retry predicate",
+      "file": "src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts",
+      "file_url": "https://github.com/microsoft/vscode/pull/319181/files",
+      "diff": "diff --git a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts\nindex 2f6f6ece6c415..7e5209dfcfe98 100644\n--- a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts\n+++ b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts\n@@ -427,15 +460,56 @@ export interface IAutomaticUnsandboxRetryOptions {\n \treadonly output: string;\n }\n \n-export function shouldAutomaticallyRetryUnsandboxed(options: IAutomaticUnsandboxRetryOptions): boolean {\n-\treturn options.allowUnsandboxedCommands\n+export interface IAutomaticAllowNetworkRetryOptions {\n+\treadonly retryWithAllowNetworkRequests: boolean;\n+\treadonly didSandboxWrapCommand: boolean;\n+\treadonly requestUnsandboxedExecution: boolean;\n+\treadonly requestAllowNetwork: boolean;\n+\treadonly isPersistentSession: boolean;\n+\treadonly isBackgroundExecution: boolean;\n+\treadonly didTimeout: boolean;\n+\treadonly exitCode: number | undefined;\n+\treadonly output: string;\n+}\n+\n+function shouldAutomaticallyRetrySandbox(options: IAutomaticSandboxRetryPredicateOptions): boolean {\n+\treturn options.retryAllowed\n \t\t&& options.didSandboxWrapCommand\n-\t\t&& options.requestUnsandboxedExecution !== true\n+\t\t&& options.retryAlreadyRequested !== true\n \t\t&& !options.isPersistentSession\n \t\t&& !options.isBackgroundExecution\n \t\t&& !options.didTimeout\n \t\t&& options.exitCode !== 0\n-\t\t&& outputLooksSandboxBlocked(options.output);\n+\t\t&& options.outputLooksRetryable(options.output);\n+}\n+\n+export function shouldAutomaticallyRetryUnsandboxed(options: IAutomaticUnsandboxRetryOptions): boolean {\n+\treturn shouldAutomaticallyRetrySandbox({\n+\t\tretryAllowed: options.allowUnsandboxedCommands,\n+\t\tretryAlreadyRequested: options.requestUnsandboxedExecution,\n+\t\tdidSandboxWrapCommand: options.didSandboxWrapCommand,\n+\t\tisPersistentSession: options.isPersistentSession,\n+\t\tisBackgroundExecution: options.isBackgroundExecution,\n+\t\tdidTimeout: options.didTimeout,\n+\t\texitCode: options.exitCode,\n+\t\toutput: options.output,\n+\t\t// Network failures are handled by shouldAutomaticallyRetryAllowNetworkInSandboxed; do not automatically leave the sandbox for them.\n+\t\toutputLooksRetryable: output => outputLooksSandboxBlocked(output) && !outputLooksSandboxNetworkBlocked(output),\n+\t});\n+}\n+\n+export function shouldAutomaticallyRetryAllowNetworkInSandboxed(options: IAutomaticAllowNetworkRetryOptions): boolean {\n+\treturn shouldAutomaticallyRetrySandbox({\n+\t\tretryAllowed: options.retryWithAllowNetworkRequests,\n+\t\tretryAlreadyRequested: options.requestUnsandboxedExecution || options.requestAllowNetwork,\n+\t\tdidSandboxWrapCommand: options.didSandboxWrapCommand,\n+\t\tisPersistentSession: options.isPersistentSession,\n+\t\tisBackgroundExecution: options.isBackgroundExecution,\n+\t\tdidTimeout: options.didTimeout,\n+\t\texitCode: options.exitCode,\n+\t\toutput: options.output,\n+\t\toutputLooksRetryable: outputLooksSandboxNetworkBlocked,\n+\t});\n }\n \n /**\n",
+      "callouts": [
+        {
+          "line": 497,
+          "side": "new",
+          "line_text": "outputLooksRetryable: output => outputLooksSandboxBlocked(output) && !outputLooksSandboxNetworkBlocked(output),",
+          "note": "network avoids unsandboxing",
+          "kind": "warn"
+        },
+        {
+          "line": 501,
+          "side": "new",
+          "line_text": "export function shouldAutomaticallyRetryAllowNetworkInSandboxed(options: IAutomaticAllowNetworkRetryOptions): boolean {",
+          "note": "new retry predicate",
+          "kind": "info"
+        },
+        {
+          "line": 504,
+          "side": "new",
+          "line_text": "retryAlreadyRequested: options.requestUnsandboxedExecution || options.requestAllowNetwork,",
+          "note": "prevents repeated escalation",
+          "kind": "warn"
+        },
+        {
+          "line": 511,
+          "side": "new",
+          "line_text": "outputLooksRetryable: outputLooksSandboxNetworkBlocked,",
+          "note": "network-only trigger",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Relaxed Network Forces Confirmation",
+      "caption": "Auto-approval yields to network-relaxation review",
+      "file": "src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts",
+      "file_url": "https://github.com/microsoft/vscode/pull/319181/files",
+      "diff": "diff --git a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts\nindex 2f6f6ece6c415..7e5209dfcfe98 100644\n--- a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts\n+++ b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts\n@@ -1034,10 +1157,12 @@ export class RunInTerminalTool extends Disposable implements IToolImpl {\n \t\t\tconfirmationTitle = blockedDomains?.length\n \t\t\t\t? localize('runInTerminal.unsandboxed.domain', \"Run `{0}` command outside the [sandbox]({1}) to access {2}?\", shellType, TERMINAL_SANDBOX_DOCUMENTATION_URL, this._formatBlockedDomainsForTitle(blockedDomains))\n \t\t\t\t: localize('runInTerminal.unsandboxed', \"Run `{0}` command outside the [sandbox]({1})?\", shellType, TERMINAL_SANDBOX_DOCUMENTATION_URL);\n+\t\t} else if (requiresAllowNetworkConfirmation) {\n+\t\t\tconfirmationTitle = localize('runInTerminal.allowNetwork', \"Allow the sandbox to run `{0}` command with unrestricted network access.\", shellType);\n \t\t}\n \n \t\t// If forceConfirmationReason is set, always show confirmation regardless of auto-approval\n-\t\tconst shouldShowConfirmation = (!isFinalAutoApproved && !isSessionAutoApproved) || context.forceConfirmationReason !== undefined;\n+\t\tconst shouldShowConfirmation = (!isFinalAutoApproved && (!isSessionAutoApproved || requiresAllowNetworkConfirmation)) || context.forceConfirmationReason !== undefined;\n \t\tconst explanation = args.explanation || localize('runInTerminal.defaultExplanation', \"No explanation provided\");\n \t\tconst goal = args.goal || localize('runInTerminal.defaultGoal', \"No goal provided\");\n \t\tconst confirmationMessage = requiresUnsandboxConfirmation\n@@ -1048,7 +1173,15 @@ export class RunInTerminalTool extends Disposable implements IToolImpl {\n \t\t\t\tgoal,\n \t\t\t\trequestUnsandboxedExecutionReason || localize('runInTerminal.unsandboxed.confirmationMessage.defaultReason', \"The model indicated that this command needs unsandboxed access.\")\n \t\t\t))\n-\t\t\t: new MarkdownString(localize('runInTerminal.confirmationMessage', \"Explanation: {0}\\n\\nGoal: {1}\", explanation, goal));\n+\t\t\t: requiresAllowNetworkConfirmation\n+\t\t\t\t? new MarkdownString(localize(\n+\t\t\t\t\t'runInTerminal.allowNetwork.confirmationMessage',\n+\t\t\t\t\t\"Explanation: {0}\\n\\nGoal: {1}\\n\\nReason for allowing unrestricted network access in the sandbox: {2}\",\n+\t\t\t\t\texplanation,\n+\t\t\t\t\tgoal,\n+\t\t\t\t\trequestAllowNetworkReason || localize('runInTerminal.allowNetwork.confirmationMessage.defaultReason', \"The model indicated that this sandboxed command needs unrestricted network access.\")\n+\t\t\t\t))\n+\t\t\t\t: new MarkdownString(localize('runInTerminal.confirmationMessage', \"Explanation: {0}\\n\\nGoal: {1}\", explanation, goal));\n \t\tconst confirmationMessages = shouldShowConfirmation ? {\n \t\t\ttitle: confirmationTitle,\n \t\t\tmessage: confirmationMessage,\n",
+      "callouts": [
+        {
+          "line": 1161,
+          "side": "new",
+          "line_text": "confirmationTitle = localize('runInTerminal.allowNetwork', \"Allow the sandbox to run `{0}` command with unrestricted network access.\", shellType);",
+          "note": "distinct permission title",
+          "kind": "info"
+        },
+        {
+          "line": 1165,
+          "side": "new",
+          "line_text": "const shouldShowConfirmation = (!isFinalAutoApproved && (!isSessionAutoApproved || requiresAllowNetworkConfirmation)) || context.forceConfirmationReason !== undefined;",
+          "note": "bypasses session auto-approval",
+          "kind": "warn"
+        },
+        {
+          "line": 1179,
+          "side": "new",
+          "line_text": "\"Explanation: {0}\\n\\nGoal: {1}\\n\\nReason for allowing unrestricted network access in the sandbox: {2}\",",
+          "note": "reason surfaces in prompt",
+          "kind": "info"
+        }
+      ]
+    },
+    {
+      "kind": "code",
+      "title": "Tests Pin The Boundary",
+      "caption": "Regression tests guard retry order and repeated requests",
+      "file": "src/vs/workbench/contrib/terminalContrib/chatAgentTools/test/electron-browser/runInTerminalTool.test.ts",
+      "file_url": "https://github.com/microsoft/vscode/pull/319181/files",
+      "diff": "diff --git a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/test/electron-browser/runInTerminalTool.test.ts b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/test/electron-browser/runInTerminalTool.test.ts\nindex 86046bf33cf14..c0c2770876816 100644\n--- a/src/vs/workbench/contrib/terminalContrib/chatAgentTools/test/electron-browser/runInTerminalTool.test.ts\n+++ b/src/vs/workbench/contrib/terminalContrib/chatAgentTools/test/electron-browser/runInTerminalTool.test.ts\n@@ -736,6 +810,36 @@ suite('RunInTerminalTool', () => {\n \t\t\t}), false);\n \t\t});\n \n+\t\ttest('should not automatically retry outside the sandbox for apparent network failures', () => {\n+\t\t\tstrictEqual(shouldAutomaticallyRetryUnsandboxed({\n+\t\t\t\t...baseRetryOptions,\n+\t\t\t\toutput: 'connect: Operation not permitted',\n+\t\t\t}), false);\n+\t\t});\n+\n+\t\ttest('should retry in the sandbox by allowing network for apparent network failures', () => {\n+\t\t\tstrictEqual(shouldAutomaticallyRetryAllowNetworkInSandboxed(baseAllowNetworkRetryOptions), true);\n+\t\t});\n+\n+\t\ttest('should not retry with allow-network when disabled or already requested', () => {\n+\t\t\tstrictEqual(shouldAutomaticallyRetryAllowNetworkInSandboxed({\n+\t\t\t\t...baseAllowNetworkRetryOptions,\n+\t\t\t\tretryWithAllowNetworkRequests: false,\n+\t\t\t}), false);\n+\t\t\tstrictEqual(shouldAutomaticallyRetryAllowNetworkInSandboxed({\n+\t\t\t\t...baseAllowNetworkRetryOptions,\n+\t\t\t\trequestAllowNetwork: true,\n+\t\t\t}), false);\n+\t\t\tstrictEqual(shouldAutomaticallyRetryAllowNetworkInSandboxed({\n+\t\t\t\t...baseAllowNetworkRetryOptions,\n+\t\t\t\trequestUnsandboxedExecution: true,\n+\t\t\t}), false);\n+\t\t\tstrictEqual(shouldAutomaticallyRetryAllowNetworkInSandboxed({\n+\t\t\t\t...baseAllowNetworkRetryOptions,\n+\t\t\t\toutput: 'regular command failure',\n+\t\t\t}), false);\n+\t\t});\n+\n \t\ttest('should not retry background, timed-out, successful, or non-sandbox-blocked results', () => {\n \t\t\tstrictEqual(shouldAutomaticallyRetryUnsandboxed({\n \t\t\t\t...baseRetryOptions,\n",
+      "callouts": [
+        {
+          "line": 813,
+          "side": "new",
+          "line_text": "test('should not automatically retry outside the sandbox for apparent network failures', () => {",
+          "note": "blocks unsafe fallback",
+          "kind": "warn"
+        },
+        {
+          "line": 820,
+          "side": "new",
+          "line_text": "test('should retry in the sandbox by allowing network for apparent network failures', () => {",
+          "note": "positive allow-network path",
+          "kind": "info"
+        },
+        {
+          "line": 824,
+          "side": "new",
+          "line_text": "test('should not retry with allow-network when disabled or already requested', () => {",
+          "note": "prevents retry loops",
+          "kind": "warn"
+        }
+      ]
+    },
+    {
+      "kind": "skipped",
+      "title": "Not in the deck",
+      "caption": "Skim these in the platform UI",
+      "groups": [
+        {
+          "label": "mirror tests",
+          "count": 4
+        },
+        {
+          "label": "type-only changes",
+          "count": 3
+        },
+        {
+          "label": "settings plumbing",
+          "count": 6
+        },
+        {
+          "label": "ui detail",
+          "count": 1
+        },
+        {
+          "label": "lockfile churn",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "kind": "outro",
+      "title": "Where to start",
+      "bullets": [
+        {
+          "text": "start in ==runInTerminalTool.ts== retry predicates",
+          "file": "src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts",
+          "file_url": "https://github.com/microsoft/vscode/pull/319181/files"
+        },
+        {
+          "text": "then inspect sandbox engine wrapCommand state",
+          "file": "src/vs/platform/sandbox/common/terminalSandboxEngine.ts",
+          "file_url": "https://github.com/microsoft/vscode/pull/319181/files"
+        },
+        {
+          "text": "[risk] regex false positives can prompt needless network access",
+          "why": "The classifier is broad; reviewers should compare it against real sandbox error strings.",
+          "file": "src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/sandboxOutputAnalyzer.ts",
+          "file_url": "https://github.com/microsoft/vscode/pull/319181/files"
+        },
+        {
+          "text": "tests cover network-before-unsandbox ordering",
+          "file": "src/vs/workbench/contrib/terminalContrib/chatAgentTools/test/electron-browser/runInTerminalTool.test.ts",
+          "file_url": "https://github.com/microsoft/vscode/pull/319181/files"
+        }
+      ],
+      "mr_url": "https://github.com/microsoft/vscode/pull/319181",
+      "files_changed": 21
+    }
+  ]
+}
+  </script>
+  <script src="vendor/roughjs/rough.umd.js"></script>
+  <script src="vendor/diff2html/diff2html-ui.min.js"></script>
+  <script src="deck.js"></script>
+</body>
+</html>

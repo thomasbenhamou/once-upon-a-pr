@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sample deck — Once Upon a PR</title>
+  <link rel="stylesheet" href="vendor/diff2html/diff2html.min.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="deck-header">
+    <span class="deck-title" id="deckTitle">Once Upon a PR</span>
+    <div class="deck-progress">
+      <span class="frac"><span id="slideIndex">1</span> / <span id="slideTotal">1</span></span>
+      <div class="bar" id="progressBar">
+        <svg class="bar-sketch" aria-hidden="true"></svg>
+        <div class="bar-fill" id="barFill"></div>
+      </div>
+    </div>
+  </header>
+
+  <main id="slides">
+
+    <!-- 1 — cover -->
+    <section class="slide active" data-kind="cover">
+      <h1>Add bio to user profiles</h1>
+      <p class="subtitle">One new field — full path from <strong>DB</strong> to <strong>UI</strong>.</p>
+      <ul class="bullets">
+        <li><span class="tag tag-new">new</span> <code>bio</code> column on <strong>users</strong> (max 280 chars)</li>
+        <li><span class="tag tag-new">new</span> <code>POST /users/:id/bio</code> endpoint</li>
+        <li><span class="tag tag-new">new</span> bio textarea in <code>ProfileEdit</code></li>
+        <li><span class="tag tag-risk">risk</span> guarded by <mark>SelfOrAdmin</mark></li>
+      </ul>
+      <div class="meta">
+        <span><strong>by</strong>tbenhamou</span>
+        <span><strong>branch</strong>feat/user-bio</span>
+        <span><strong>+52</strong>/<strong>−1</strong></span>
+        <span><strong>4</strong>files</span>
+      </div>
+    </section>
+
+    <!-- 2 — migration (DB) -->
+    <section class="slide" data-kind="code">
+      <div class="code-head">
+        <h3>Migration: add bio column</h3>
+        <a class="file-link" href="https://example.com/-/merge_requests/42/diffs#mig" target="_blank" rel="noreferrer">db/migrations/20260426_add_bio_to_users.sql</a>
+      </div>
+      <p class="caption">Nullable so existing rows don't need a backfill.</p>
+      <div class="diff-frame">
+        <svg class="frame-sketch" aria-hidden="true"></svg>
+        <div class="diff-container"></div>
+      </div>
+      <script type="application/x-diff" class="slide-diff">diff --git a/db/migrations/20260426_add_bio_to_users.sql b/db/migrations/20260426_add_bio_to_users.sql
+new file mode 100644
+--- /dev/null
++++ b/db/migrations/20260426_add_bio_to_users.sql
+@@ -0,0 +1,3 @@
++ALTER TABLE users
++  ADD COLUMN bio VARCHAR(280) NULL
++  AFTER avatar_url;</script>
+      <script type="application/json" class="slide-callouts">[
+        { "line": 2, "note": "280 chars — same cap on the API and the textarea.", "kind": "info" },
+        { "line": 2, "note": "NULL allowed — existing rows stay valid, no backfill.", "kind": "info" }
+      ]</script>
+    </section>
+
+    <!-- 3 — service -->
+    <section class="slide" data-kind="code">
+      <div class="code-head">
+        <h3>Service: updateBio</h3>
+        <a class="file-link" href="https://example.com/-/merge_requests/42/diffs#svc" target="_blank" rel="noreferrer">src/users/users.service.ts</a>
+      </div>
+      <p class="caption">Validates length, trims whitespace, persists.</p>
+      <div class="diff-frame">
+        <svg class="frame-sketch" aria-hidden="true"></svg>
+        <div class="diff-container"></div>
+      </div>
+      <script type="application/x-diff" class="slide-diff">diff --git a/src/users/users.service.ts b/src/users/users.service.ts
+--- a/src/users/users.service.ts
++++ b/src/users/users.service.ts
+@@ -22,3 +22,12 @@ export class UsersService {
+     return this.repo.save(user);
+   }
++
++  async updateBio(userId: string, bio: string) {
++    if (bio.length > 280) {
++      throw new BadRequestException("Bio must be 280 chars or less");
++    }
++    const user = await this.repo.findOneByOrFail({ id: userId });
++    user.bio = bio.trim();
++    return this.repo.save(user);
++  }
+ }</script>
+      <script type="application/json" class="slide-callouts">[
+        { "line": 27, "note": "Server-side guard — UI maxLength alone isn't enough.", "kind": "warn" },
+        { "line": 30, "note": "Trim defends against trailing whitespace from copy/paste.", "kind": "info" }
+      ]</script>
+    </section>
+
+    <!-- 4 — controller / POST endpoint -->
+    <section class="slide" data-kind="code">
+      <div class="code-head">
+        <h3>Endpoint: POST /users/:id/bio</h3>
+        <a class="file-link" href="https://example.com/-/merge_requests/42/diffs#ctl" target="_blank" rel="noreferrer">src/users/users.controller.ts</a>
+      </div>
+      <p class="caption">Self-or-admin only. Body is just <code>{ bio }</code>.</p>
+      <div class="diff-frame">
+        <svg class="frame-sketch" aria-hidden="true"></svg>
+        <div class="diff-container"></div>
+      </div>
+      <script type="application/x-diff" class="slide-diff">diff --git a/src/users/users.controller.ts b/src/users/users.controller.ts
+--- a/src/users/users.controller.ts
++++ b/src/users/users.controller.ts
+@@ -30,4 +30,10 @@ export class UsersController {
+   getProfile(@Param("id") id: string) {
+     return this.users.getProfile(id);
+   }
++
++  @Post(":id/bio")
++  @UseGuards(SelfOrAdminGuard)
++  updateBio(@Param("id") id: string, @Body("bio") bio: string) {
++    return this.users.updateBio(id, bio);
++  }
+ }</script>
+      <script type="application/json" class="slide-callouts">[
+        { "line": 35, "note": "Without this guard, anyone could overwrite any bio.", "kind": "warn" }
+      ]</script>
+    </section>
+
+    <!-- 5 — UI form -->
+    <section class="slide" data-kind="code">
+      <div class="code-head">
+        <h3>UI: bio textarea in ProfileEdit</h3>
+        <a class="file-link" href="https://example.com/-/merge_requests/42/diffs#ui" target="_blank" rel="noreferrer">web/src/profile/ProfileEdit.tsx</a>
+      </div>
+      <p class="caption">Live counter, hard cap at 280, save POSTs to the new endpoint.</p>
+      <div class="diff-frame">
+        <svg class="frame-sketch" aria-hidden="true"></svg>
+        <div class="diff-container"></div>
+      </div>
+      <script type="application/x-diff" class="slide-diff">diff --git a/web/src/profile/ProfileEdit.tsx b/web/src/profile/ProfileEdit.tsx
+--- a/web/src/profile/ProfileEdit.tsx
++++ b/web/src/profile/ProfileEdit.tsx
+@@ -8,5 +8,6 @@ type Props = { user: User };
+ export function ProfileEdit({ user }: Props) {
+   const [name, setName] = useState(user.name);
++  const [bio, setBio] = useState(user.bio ?? "");
+   const save = useSaveProfile(user.id);
+
+   return (
+@@ -16,6 +17,15 @@ export function ProfileEdit({ user }: Props) {
+         value={name}
+         onChange={(e) => setName(e.target.value)}
+       />
++      <label>
++        Bio <span className="hint">{bio.length}/280</span>
++        <textarea
++          maxLength={280}
++          value={bio}
++          onChange={(e) => setBio(e.target.value)}
++        />
++      </label>
++      <button onClick={() => save({ name, bio })}>Save</button>
+     </form>
+   );
+ }</script>
+      <script type="application/json" class="slide-callouts">[
+        { "line": 21, "note": "Live char counter — UX nudge, not validation.", "kind": "info" },
+        { "line": 28, "note": "Save calls POST /users/:id/bio.", "kind": "info" }
+      ]</script>
+    </section>
+
+    <!-- 6 — outro -->
+    <section class="slide" data-kind="outro">
+      <h2>Where to start reviewing</h2>
+      <ul class="bullets">
+        <li><span class="tag tag-risk">risk</span> confirm <mark>SelfOrAdminGuard</mark> covers this route</li>
+        <li><span class="tag tag-new">new</span> 280-char limit consistent across <strong>DB / API / UI</strong></li>
+        <li><span class="tag tag-fix">fix</span> snapshot test on <code>ProfileEdit</code></li>
+      </ul>
+      <a class="mr-cta" href="https://example.com/-/merge_requests/42" target="_blank" rel="noreferrer">Open the MR →</a>
+      <div class="deck-meta">4 files changed</div>
+    </section>
+
+  </main>
+
+  <nav class="deck-nav" aria-label="Slide navigation">
+    <div class="kbd-hint" id="kbdHint">
+      <svg class="kbd-frame" aria-hidden="true"></svg>
+      <span class="kbd-caption">
+        <span class="kbd-glyph" aria-hidden="true">&#9000;</span>
+        <span class="kbd-keys">&#9664;&nbsp;&#9654;</span>
+        <span class="kbd-text">to navigate</span>
+      </span>
+    </div>
+    <div class="nav-buttons">
+      <button id="prevBtn" class="nav-btn" aria-label="Previous slide">
+        <svg class="nav-sketch" aria-hidden="true"></svg>
+        <span class="nav-arrow">&#9664;</span>
+      </button>
+      <button id="nextBtn" class="nav-btn" aria-label="Next slide">
+        <svg class="nav-sketch" aria-hidden="true"></svg>
+        <span class="nav-arrow">&#9654;</span>
+      </button>
+    </div>
+  </nav>
+
+  <script id="manifest" type="application/json">
+    { "mr_id": "42",
+      "mr_title": "Add bio to user profiles",
+      "mr_url": "https://example.com/-/merge_requests/42",
+      "generated_at": "2026-04-26T12:00:00Z",
+      "commit_sha": "def5678" }
+  </script>
+  <script src="vendor/roughjs/rough.umd.js"></script>
+  <script src="vendor/diff2html/diff2html-ui.min.js"></script>
+  <script src="deck.js"></script>
+</body>
+</html>

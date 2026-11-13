@@ -1,9 +1,12 @@
 {
-  "name": "tell-me-a-pr-scripts",
+  "name": "once-upon-a-pr-scripts",
   "private": true,
   "type": "module",
   "scripts": {
-    "record": "node record-demo.mjs"
+    "record": "node record-demo.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:browser": "node test/deck.browser.mjs",
+    "sample": "node build-sample.mjs && node build-sample.mjs .agents/skills/once-upon-a-pr"
   },
   "devDependencies": {
     "playwright": "^1.49.0"
