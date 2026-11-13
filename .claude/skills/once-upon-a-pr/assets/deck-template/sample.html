@@ -4,13 +4,17 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Add a short bio to user profiles · example</title>
+  <link rel="icon" type="image/svg+xml" href="vendor/brand/book-spark.svg">
   <link rel="stylesheet" href="vendor/diff2html/diff2html.min.css">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header class="deck-header">
     <div class="deck-identity">
-      <span class="deck-brand"><span class="brand-fairy" aria-hidden="true">🧚</span> Once Upon a PR</span>
+      <span class="brand-lockup">
+        <img class="brand-mark" src="vendor/brand/book-spark.svg" width="36" height="36" alt="">
+        <span class="deck-brand"><em>Once Upon</em> a PR</span>
+      </span>
       <span class="deck-title" id="deckTitle">A walkthrough of the change</span>
     </div>
     <div class="deck-progress">
@@ -23,7 +27,8 @@
 
   <main id="slides">
     <section class="slide active" data-kind="cover">
-  <p class="eyebrow">A sample walkthrough</p>
+  <img class="cover-ornament" src="vendor/brand/book-spark.svg" width="144" height="144" alt="" aria-hidden="true">
+  <p class="eyebrow"><span class="chapter-number" aria-hidden="true">01</span><span>A sample walkthrough</span></p>
   <h1>A little more context on each profile</h1>
   <p class="subtitle">People can add a short bio. Leaving it blank keeps their profile just as it is today.</p>
   <div class="change-overview">
@@ -43,7 +48,7 @@
 </section>
 
 <section class="slide" data-kind="code">
-  <p class="eyebrow">A closer look</p>
+  <p class="eyebrow"><span class="chapter-number" aria-hidden="true">02</span><span>A closer look</span></p>
   <div class="code-head"><h2>Existing profiles keep working</h2></div>
   <p class="caption">The new field is optional. Existing rows need no backfill, and a bio can be added whenever someone is ready.</p>
   <div class="code-layout">
@@ -57,7 +62,7 @@
 </section>
 
 <section class="slide" data-kind="code">
-  <p class="eyebrow">A closer look</p>
+  <p class="eyebrow"><span class="chapter-number" aria-hidden="true">03</span><span>A closer look</span></p>
   <div class="code-head"><h2>The limit belongs on the server too</h2></div>
   <p class="caption">The editor helps people stay within 280 characters. The API enforces that limit for every caller.</p>
   <div class="code-layout">
@@ -71,7 +76,7 @@
 </section>
 
 <section class="slide" data-kind="code">
-  <p class="eyebrow">A closer look</p>
+  <p class="eyebrow"><span class="chapter-number" aria-hidden="true">04</span><span>A closer look</span></p>
   <div class="code-head"><h2>Keep the same permission boundary</h2></div>
   <p class="caption">Editing a bio uses the existing profile guard, so access stays limited to the owner and administrators.</p>
   <div class="code-layout">
@@ -90,6 +95,7 @@
   </main>
 
   <nav class="deck-nav" aria-label="Slide navigation">
+    <span class="footer-signature"><span aria-hidden="true">✦</span> A change, told clearly.</span>
     <span class="kbd-hint">Use <kbd>←</kbd> <kbd>→</kbd> to move through the story</span>
     <div class="nav-buttons">
       <button id="prevBtn" class="nav-btn" aria-label="Previous slide">

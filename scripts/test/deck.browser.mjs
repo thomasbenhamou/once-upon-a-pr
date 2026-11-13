@@ -8,6 +8,7 @@ import { buildDeck } from '../../.claude/skills/once-upon-a-pr/scripts/ouapr.mjs
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const sample = path.join(repoRoot, '.claude/skills/once-upon-a-pr/assets/deck-template/sample.html');
+const template = path.join(repoRoot, '.claude/skills/once-upon-a-pr/assets/deck-template/index.html');
 const previews = path.join(repoRoot, '.tmp/preview');
 fs.mkdirSync(previews, { recursive: true });
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ouapr-browser-'));
@@ -18,14 +19,21 @@ try {
   const errors = [];
   const warnings = [];
   page.on('pageerror', error => errors.push(error.message));
-  page.on('console', message => { if (message.type() === 'warning') warnings.push(message.text()); });
+  page.on('console', message => {
+    if (message.type() === 'warning') warnings.push(message.text());
+    if (message.type() === 'error') errors.push(message.text());
+  });
   await page.route('**/*', route => route.request().url().startsWith('file:') ? route.continue() : route.abort());
-  await page.goto(pathToFileURL(sample).href);
+  await page.goto(pathToFileURL(template).href + '#3');
+  await page.waitForURL(pathToFileURL(sample).href + '#3');
+  assert.equal(await page.locator('#slideIndex').textContent(), '3', 'Opening the template shows the sample and preserves the requested slide');
+  await page.goto(pathToFileURL(sample).href + '#1');
   await page.evaluate(() => document.fonts.ready);
   assert.equal(await page.locator('.slide:not([hidden])').count(), 1);
   assert.equal(await page.locator('#prevBtn').isDisabled(), true);
   assert.equal(await page.locator('.slide.active .change-areas dt').count(), 4);
-  assert.equal(await page.locator('.deck-brand').textContent(), '🧚 Once Upon a PR');
+  assert.equal(await page.locator('.deck-brand').textContent(), 'Once Upon a PR');
+  assert.ok(await page.evaluate(() => document.fonts.check('24px Newsreader') && document.fonts.check('italic 24px Newsreader') && document.fonts.check('16px "DM Sans"')), 'Bundled typefaces load offline');
   await page.screenshot({ path: path.join(previews, 'cover.png'), animations: 'disabled' });
 
   for (let index = 1; index <= 3; index++) {
@@ -101,7 +109,7 @@ try {
   assert.equal(await page.locator('.code-note').count(), 2);
   assert.deepEqual(errors, []);
   assert.deepEqual(warnings, []);
-  console.log('Browser checks passed: rendering, anchors, visible notes, navigation, deep links, resize, mobile, reduced motion, and literal source text.');
+  console.log('Browser checks passed: template preview redirect, rendering, anchors, visible notes, navigation, deep links, resize, mobile, reduced motion, and literal source text.');
   console.log(`Previews: ${previews}`);
 } finally {
   await browser.close();

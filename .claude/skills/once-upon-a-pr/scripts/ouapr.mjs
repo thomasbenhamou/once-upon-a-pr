@@ -799,9 +799,10 @@ function renderChanges(changes = []) {
 function renderSlide(slide, index, metadata = {}) {
   const active = index === 0 ? ' active' : '';
   const labels = { cover: 'The intent', section: 'The approach', code: 'A closer look', risk: 'Worth checking', skipped: 'Also changed', outro: 'Your review' };
-  const eyebrow = `<p class="eyebrow">${escapeHtml(slide.eyebrow || labels[slide.kind] || '')}</p>`;
+  const eyebrow = `<p class="eyebrow"><span class="chapter-number" aria-hidden="true">${String(index + 1).padStart(2, '0')}</span><span>${escapeHtml(slide.eyebrow || labels[slide.kind] || '')}</span></p>`;
   if (slide.kind === 'cover') {
     return `<section class="slide${active}" data-kind="cover">
+  <img class="cover-ornament" src="vendor/brand/book-spark.svg" width="144" height="144" alt="" aria-hidden="true">
   ${eyebrow}
   <h1>${escapeHtml(slide.title)}</h1>
   ${slide.subtitle ? `<p class="subtitle">${renderInline(slide.subtitle)}</p>` : ''}
@@ -878,6 +879,8 @@ export function buildDeck(metadata, slides, outDir, opts = {}) {
   const slug = metadata.slug || makeSlug(metadata.mr_id, metadata.title);
   fs.mkdirSync(outDir, { recursive: true });
   copyDir(path.join(templateDir, 'vendor/diff2html'), path.join(outDir, 'vendor/diff2html'));
+  copyDir(path.join(templateDir, 'vendor/type'), path.join(outDir, 'vendor/type'));
+  copyDir(path.join(templateDir, 'vendor/brand'), path.join(outDir, 'vendor/brand'));
   for (const name of ['deck.js', 'styles.css']) {
     fs.copyFileSync(path.join(templateDir, name), path.join(outDir, name));
   }

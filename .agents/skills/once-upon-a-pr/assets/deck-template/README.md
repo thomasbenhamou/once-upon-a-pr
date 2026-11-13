@@ -1,8 +1,12 @@
 # Deck data and template
 
-The Node runner renders a JSON array of slides into `index.html` and copies `styles.css`, `deck.js`, and the local diff2html assets. A generated deck opens directly from disk and needs no server or network connection.
+The Node runner renders a JSON array of slides into `index.html` and copies `styles.css`, `deck.js`, the local diff2html assets, fonts, and brand emblem. A generated deck opens directly from disk and needs no server or network connection.
 
-The visual direction is quiet: an almost-white background, system sans-serif text, comfortable spacing, subtle green/red diffs, and visible numbered notes beside the code. Edit the shared template to change the look. No drawing library or downloaded font is required.
+For a quick preview, open `sample.html`. Opening the unfilled `index.html` template also takes you to that sample, keeping any slide fragment such as `#3`. Generated PR decks display their own content normally.
+
+The visual identity is editorial and quiet: neutral white, Newsreader serif headings, DM Sans body text, and a muted plum accent. A book-and-spark emblem, italic wordmark, chapter numerals, and small colophon distinguish the slides. Subtle green/red diffs and visible numbered notes keep code readable. Edit the shared template to change the look.
+
+Fonts and their OFL licenses live in `vendor/type/`; the original SVG emblem lives in `vendor/brand/`. They are copied into each generated deck. There are no CDN or font-service requests at viewing time.
 
 ## Slide shapes
 

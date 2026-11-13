@@ -23,7 +23,7 @@ See [references/narrative-patterns.md](references/narrative-patterns.md) for exa
 
 ## Keep the experience calm
 
-Use the bundled template: an almost-white canvas, clear system typography, generous space, and restrained colors. Let the content carry the slide. Diffs keep subtle added/removed colors; numbered notes explain selected lines beside the code. Annotations should earn their place.
+Use the bundled visual identity: a neutral light canvas, Newsreader serif headings, DM Sans body text, generous space, and a muted plum accent. The book-and-spark emblem, italic wordmark, and chapter numerals give the deck its Once Upon a PR signature. Let the content carry the slide. Diffs keep subtle added/removed colors; numbered notes explain selected lines beside the code. Annotations should earn their place.
 
 Choose a small diff excerpt that explains one decision. Include enough context to make it intelligible, preserve original code and line numbers, and split a busy slide when that makes it easier to follow. Avoid shrinking the text to squeeze in more code.
 

@@ -235,6 +235,9 @@ test('build renders escaped HTML, assets, manifest JSON, and callout payloads', 
   assert.equal(manifest.mr_title, 'Escape <script> Deck');
   assert.equal(fs.existsSync(path.join(tmp, 'deck.js')), true);
   assert.equal(fs.existsSync(path.join(tmp, 'styles.css')), true);
+  assert.equal(fs.existsSync(path.join(tmp, 'vendor/type/newsreader-roman-latin.woff2')), true);
+  assert.equal(fs.existsSync(path.join(tmp, 'vendor/type/OFL-newsreader.txt')), true);
+  assert.equal(fs.existsSync(path.join(tmp, 'vendor/brand/book-spark.svg')), true);
 });
 
 test('build renders risk bullet review links', () => {

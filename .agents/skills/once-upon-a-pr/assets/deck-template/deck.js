@@ -1,5 +1,12 @@
 (() => {
   const slides = Array.from(document.querySelectorAll('.slide'));
+  // Opening the unfilled template should show its bundled preview, not an empty canvas.
+  if (!slides.length && document.getElementById('manifest')?.textContent.trim() === '<!-- MANIFEST -->') {
+    const sample = new URL('sample.html', location.href);
+    sample.hash = location.hash || '#1';
+    location.replace(sample.href);
+    return;
+  }
   const indexEl = document.getElementById('slideIndex');
   const totalEl = document.getElementById('slideTotal');
   const barFill = document.getElementById('barFill');

@@ -4,7 +4,7 @@ Interactive MR/PR walkthrough deck generator.
 
 Understand a pull request the way you would if a colleague walked you through it: why the change exists, the important decisions, and the code that makes them work.
 
-`once-upon-a-pr` is a portable coding-agent skill that creates a short, interactive HTML deck from a GitHub PR or GitLab MR. Clean slides, focused diffs, and explanations beside the code. Natural writing, with the length and shape chosen for the change.
+`once-upon-a-pr` is a portable coding-agent skill that creates a short, interactive HTML deck from a GitHub PR or GitLab MR. Editorial typography, a quiet storybook identity, focused diffs, and explanations beside the code. Natural writing, with the length and shape chosen for the change.
 
 The opening introduces the intent and the areas touched, such as the database, service, and controller. The closing keeps a single large button back to the pull request.
 
