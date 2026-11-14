@@ -8,7 +8,9 @@ Understand a pull request the way you would if a colleague walked you through it
 
 The opening introduces the intent and the areas touched, such as the database, service, and controller. The closing keeps a single large button back to the pull request.
 
-![The opening slide with an overview of the areas changed](docs/preview.png)
+![Once Upon a PR walkthrough: intent and change overview, annotated diffs, and the button back to the pull request](docs/demo.gif)
+
+Recorded from the current bundled sample. [View the opening slide](docs/preview.png).
 
 ### Sample deck
 
@@ -74,3 +76,5 @@ The agent makes the editorial decisions. The runner handles repeatable mechanics
 From `scripts/`, run `npm test` for the runner checks. The optional browser checks use the Playwright development dependency: `npm install`, `npx playwright install chromium`, then `npm run test:browser`.
 
 Run `npm run sample` to regenerate both bundled samples from the illustrative fixture. Generated decks in `docs/once-upon-a-pr/` are historical examples; the bundled sample shows the current design.
+
+Run `npm run record` to refresh the README GIF and opening-slide image from that sample. Recording uses Playwright Chromium and [gifski](https://gif.ski/); these are development tools, not skill dependencies.

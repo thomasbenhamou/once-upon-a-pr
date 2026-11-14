@@ -1,7 +1,7 @@
 import { chromium } from 'playwright';
-import { mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { copyFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -13,13 +13,14 @@ const samplePath = resolve(
 const tmpDir = resolve(repoRoot, '.tmp/demo-record');
 const framesDir = join(tmpDir, 'frames');
 const outGif = resolve(repoRoot, 'docs/demo.gif');
+const outPreview = resolve(repoRoot, 'docs/preview.png');
 
 // Per-slide hold times (ms). Index 0 = slide 1, etc.
-const holds = [2600, 2400, 3200, 2800, 2400];
+const holds = [3400, 4000, 4400, 4000, 2200];
 
 const VIEWPORT = { width: 1280, height: 800 };
 const GIF_WIDTH = 960;
-const FPS = 10;
+const FPS = 5;
 
 if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true });
 mkdirSync(framesDir, { recursive: true });
@@ -29,15 +30,19 @@ const browser = await chromium.launch();
 const ctx = await browser.newContext({
   viewport: VIEWPORT,
   deviceScaleFactor: 2,
+  reducedMotion: 'reduce',
 });
 const page = await ctx.newPage();
-await page.goto('file://' + samplePath, { waitUntil: 'load' });
+const errors = [];
+page.on('pageerror', error => errors.push(error.message));
+await page.route('**/*', route => route.request().url().startsWith('file:') ? route.continue() : route.abort());
+await page.goto(pathToFileURL(samplePath).href, { waitUntil: 'load' });
 
-// Wait for diff2html to finish + rough.js sketches to draw.
+// Capture the rendered deck with its bundled fonts, entirely offline.
 await page.waitForFunction(
-  () => document.querySelectorAll('.slide').length > 0,
+  () => document.querySelectorAll('.slide.active').length === 1,
 );
-await page.waitForTimeout(1500);
+await page.evaluate(() => document.fonts.ready);
 
 const total = await page.evaluate(
   () => document.querySelectorAll('.slide').length,
@@ -52,44 +57,22 @@ const slidePngs = [];
 for (let n = 1; n <= total; n++) {
   if (n > 1) {
     await page.keyboard.press('ArrowRight');
-    await page.waitForTimeout(450);
   }
-  // give rAF callout overlay a moment to render
-  await page.waitForTimeout(300);
+  await page.waitForFunction(index => document.querySelector('#slideIndex').textContent === String(index), n);
   const file = join(framesDir, `slide-${String(n).padStart(2, '0')}.png`);
-  await page.screenshot({ path: file, fullPage: false });
+  await page.screenshot({ path: file, fullPage: false, animations: 'disabled' });
   slidePngs.push(file);
   console.log(`captured slide ${n}/${total}`);
 }
 
 await browser.close();
+if (errors.length) throw new Error(errors.join('\n'));
 
-// Build a concat list for ffmpeg with per-frame durations.
-const concatLines = [];
+// Hold each slide long enough to read. Encode directly from PNGs so code stays crisp.
+const gifFrames = [];
 for (let i = 0; i < slidePngs.length; i++) {
-  const dur = (holds[i] ?? 2000) / 1000;
-  concatLines.push(`file '${slidePngs[i]}'`);
-  concatLines.push(`duration ${dur.toFixed(3)}`);
-}
-// ffmpeg concat demuxer requires the last file to be repeated without a duration.
-concatLines.push(`file '${slidePngs[slidePngs.length - 1]}'`);
-const listFile = join(tmpDir, 'concat.txt');
-writeFileSync(listFile, concatLines.join('\n'));
-
-const mp4 = join(tmpDir, 'demo.mp4');
-const ffmpegArgs = [
-  '-y',
-  '-f', 'concat',
-  '-safe', '0',
-  '-i', listFile,
-  '-vf', `scale=${GIF_WIDTH}:-2:flags=lanczos,fps=${FPS}`,
-  '-pix_fmt', 'yuv420p',
-  '-c:v', 'libx264',
-  mp4,
-];
-const ff = spawnSync('ffmpeg', ffmpegArgs, { stdio: 'inherit' });
-if (ff.status !== 0) {
-  throw new Error(`ffmpeg failed (exit ${ff.status})`);
+  const count = Math.max(1, Math.round((holds[i] ?? 3000) / 1000 * FPS));
+  gifFrames.push(...Array(count).fill(slidePngs[i]));
 }
 
 const gifski = spawnSync(
@@ -99,12 +82,14 @@ const gifski = spawnSync(
     '--fps', String(FPS),
     '--width', String(GIF_WIDTH),
     '--quality', '85',
-    mp4,
+    '--no-sort',
+    ...gifFrames,
   ],
   { stdio: 'inherit' },
 );
 if (gifski.status !== 0) {
   throw new Error(`gifski failed (exit ${gifski.status})`);
 }
+copyFileSync(slidePngs[0], outPreview);
 
-console.log(`\nWrote ${outGif}`);
+console.log(`\nWrote ${outGif} and ${outPreview}`);
